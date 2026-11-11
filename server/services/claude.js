@@ -7,7 +7,7 @@ import { execFile, spawn } from 'child_process';
 import { listAllWorktrees } from './git.js';
 import { buildTaskBrief, sessionName } from './taskBrief.js';
 import { childEnv } from '../security.js';
-import { projectBases, findProject } from './projects.js';
+import { projectBases, findProject, projectFlags } from './projects.js';
 
 // Claude Code writes one JSONL transcript per session under
 // ~/.claude/projects/{encoded-cwd}/{sessionId}.jsonl. Each entry carries the cwd,
@@ -82,10 +82,14 @@ async function readSession(file) {
   const headless = (head.find(e => e.entrypoint)?.entrypoint ?? '').startsWith('sdk')
     && process.env.CLAUDE_INCLUDE_HEADLESS !== 'true';
   let customTitle = null, aiTitle = null, lastPrompt = null;
+  let contextTokens = null;
   for (const entry of tail) {
     if (entry.type === 'custom-title') customTitle = entry.customTitle;
     else if (entry.type === 'ai-title') aiTitle = entry.aiTitle;
     lastPrompt = promptText(entry) ?? lastPrompt;
+    // Context size = what the last model call read: fresh + cached input
+    const u = entry.type === 'assistant' && !entry.isSidechain ? entry.message?.usage : null;
+    if (u) contextTokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
   const firstPrompt = head.map(promptText).find(Boolean) ?? null;
   if (!customTitle && !aiTitle && !lastPrompt && size > HEAD_BYTES + TAIL_BYTES) {
@@ -103,6 +107,7 @@ async function readSession(file) {
     title,
     lastPrompt: lastPrompt ?? firstPrompt,
     lastActiveAt: new Date(mtimeMs).toISOString(),
+    contextTokens,
     resumeCommand: `cd ${shellQuote(cwd)} && claude --resume ${id}`
   } : null;
   cache.set(file, { mtimeMs, size, session });
@@ -233,9 +238,9 @@ function openInTerminalApp(command, title) {
 // file's contents are passed as the opening prompt (read by the shell, so they
 // never pass through quoting). macOS uses Terminal.app; elsewhere the program
 // named by BANDWIDTH_LAUNCHER is run, without a shell, as:
-//   <launcher> <cwd> <title> [--prompt-file <file>] -- <claude args...>
+//   <launcher> <cwd> <title> [--prompt-file <file>] [--prefill <text>] -- <claude args...>
 // scripts/launch-wsl-terminal.sh is one for WSL + Windows Terminal.
-function openClaude({ cwd, title, args, promptFile }) {
+function openClaude({ cwd, title, args, promptFile, prefill }) {
   const name = terminalTitle(title);
   if (process.platform === 'darwin' && !process.env.BANDWIDTH_LAUNCHER) {
     const prompt = promptFile ? ` "$(cat ${shellQuote(promptFile)})"` : '';
@@ -245,10 +250,20 @@ function openClaude({ cwd, title, args, promptFile }) {
   const launcher = process.env.BANDWIDTH_LAUNCHER;
   if (!launcher) throw new Error('Set BANDWIDTH_LAUNCHER to a terminal launcher script (see README)');
   const child = spawn(launcher, [
-    cwd, name, ...(promptFile ? ['--prompt-file', promptFile] : []), '--', ...args
+    cwd, name, ...(promptFile ? ['--prompt-file', promptFile] : []),
+    ...(prefill ? ['--prefill', prefill] : []), '--', ...args
   ], { detached: true, stdio: 'ignore', env: childEnv() });
   child.on('error', err => console.error('launcher failed:', err.message));
   child.unref();
+}
+
+// A fresh Claude session in a project folder. NEW_SESSION_PREFILL (e.g. a slash
+// command) is typed into its input box but not sent; launchers that can't type
+// into the terminal ignore it.
+export async function newSession(projectPath) {
+  const project = await findProject(projectPath);
+  if (!project) throw new Error('Project not found');
+  openClaude({ cwd: project.path, title: project.name, args: [], prefill: process.env.NEW_SESSION_PREFILL || null });
 }
 
 // Opens a new terminal resuming the session in its original directory
@@ -260,6 +275,38 @@ export async function resumeSession(sessionId) {
   openClaude({ cwd: session.cwd, title: session.title, args: ['--resume', session.id] });
 }
 
+// SESSION_STATE_DIR: optional folder of JSON files, one per live session, written
+// by a Claude Code hook: { session_id, state: 'idle' | 'busy' | 'waiting', ts, pane? }.
+// A file whose tmux pane no longer exists is ignored. -> Map(session_id -> state)
+async function liveSessionStates() {
+  const dir = process.env.SESSION_STATE_DIR;
+  if (!dir) return new Map();
+  const files = (await readdir(dir).catch(() => [])).filter(f => f.endsWith('.json'));
+  const states = (await Promise.all(files.map(f =>
+    readFile(join(dir, f), 'utf8').then(JSON.parse).catch(() => null)))).filter(s => s?.session_id);
+  let panes = null;
+  if (states.some(s => s.pane)) {
+    panes = new Set((await execOutput('tmux', ['list-panes', '-a', '-F', '#{pane_id}'])).split('\n').filter(Boolean));
+  }
+  const out = new Map();
+  for (const s of states) {
+    if (s.pane && panes && !panes.has(s.pane)) continue;
+    out.set(s.session_id, { state: s.state, since: s.ts ? new Date(s.ts * 1000).toISOString() : null });
+  }
+  return out;
+}
+
+// FOCUS_URL_TEMPLATE: a link that brings a running session's terminal to the
+// front, e.g. a custom protocol handler. Placeholders: {title} {project} (URL
+// encoded) and {title64} {project64} (base64url).
+function focusUrl(title, project) {
+  const t = process.env.FOCUS_URL_TEMPLATE;
+  if (!t) return null;
+  const b64 = s => Buffer.from(s, 'utf8').toString('base64url');
+  return t.replaceAll('{title64}', b64(title)).replaceAll('{project64}', b64(project))
+    .replaceAll('{title}', encodeURIComponent(title)).replaceAll('{project}', encodeURIComponent(project));
+}
+
 // Recent sessions grouped by project folder (see projects.js). Sessions started
 // anywhere inside a project count, so work outside git worktrees shows up too.
 export async function listClaudeProjects() {
@@ -267,9 +314,11 @@ export async function listClaudeProjects() {
   if (bases.length === 0) return [];
   const days = Number(process.env.CLAUDE_PROJECT_DAYS) || 14;
   const since = Date.now() - days * 24 * 60 * 60 * 1000;
-  const [sessions, running] = await Promise.all([
+  const [sessions, running, live, flags] = await Promise.all([
     listSessions().catch(() => []),
-    runningClaudeCwds().catch(() => [])
+    runningClaudeCwds().catch(() => []),
+    liveSessionStates().catch(() => new Map()),
+    projectFlags()
   ]);
   const projectOf = p => {
     for (const base of bases) {
@@ -285,20 +334,29 @@ export async function listClaudeProjects() {
     byPath.get(path).push(s);
   }
   const runningPaths = new Set(running.map(projectOf).filter(Boolean));
-  return [...byPath].map(([path, list]) => {
-    list.sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt));
-    const isRunning = runningPaths.has(path);
-    if (isRunning) list[0] = { ...list[0], running: true };
+  return [...byPath].map(([path, rawList]) => {
+    const name = basename(path);
+    // Live state files name their sessions exactly; without one, the newest
+    // session in a folder where `claude` runs is assumed to be the live one
+    let list = rawList
+      .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt))
+      .map(s => (live.has(s.id) ? { ...s, running: true, state: live.get(s.id).state, stateSince: live.get(s.id).since } : s));
+    const isRunning = runningPaths.has(path) || list.some(s => s.running);
+    if (isRunning && !list.some(s => s.running)) list[0] = { ...list[0], running: true };
+    list = list.map(s => (s.running ? { ...s, focusUrl: focusUrl(s.title, name) } : s));
     return {
-      name: basename(path),
+      name,
       path,
+      ...flags(name),
       claudeSessions: list,
       claudeRunning: isRunning,
+      waiting: list.some(s => s.state === 'waiting'),
       lastSessionAt: list[0].lastActiveAt
     };
   })
     .filter(p => p.claudeRunning || Date.parse(p.lastSessionAt) >= since)
-    .sort((a, b) => (b.claudeRunning - a.claudeRunning) || b.lastSessionAt.localeCompare(a.lastSessionAt));
+    .sort((a, b) => (b.waiting - a.waiting) || (b.claudeRunning - a.claudeRunning) ||
+      b.lastSessionAt.localeCompare(a.lastSessionAt));
 }
 
 function validateItem(item) {

@@ -104,6 +104,12 @@ export async function getJiraBoards() {
 }
 
 const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]*$/;
+const MAX_ISSUES = 500;
+
+// JIRA_WAITING_STATUSES: statuses where the next move is someone else's (comma separated)
+function waitingStatuses() {
+  return new Set((process.env.JIRA_WAITING_STATUSES || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+}
 
 export async function getJiraIssueTypes(projectKey) {
   if (!PROJECT_KEY_RE.test(projectKey)) throw new Error('Invalid project key');
@@ -174,24 +180,21 @@ export async function getJiraItems() {
     : '';
   const jql = `assignee = currentUser() AND status not in (Done, Closed, Resolved)${projectClause} ORDER BY updated DESC`;
 
-  const url = `${apiBase}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=50&fields=summary,description,issuetype,priority,status,labels,customfield_10016,updated,created`;
-
-  let res;
-  try {
-    res = await fetch(url, {
-      headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' }
-    });
-  } catch (err) {
-    console.error('Jira fetch error:', err.message);
-    return [];
-  }
-
-  if (!res.ok) {
-    console.error('Jira API error:', res.status);
-    return [];
-  }
-
-  const data = await res.json();
+  const fields = 'summary,description,issuetype,priority,status,labels,customfield_10016,updated,created';
+  // search/jql pages with nextPageToken; stop at MAX_ISSUES so a bad JQL can't run away
+  const issues = [];
+  let nextPageToken = null;
+  do {
+    const url = `${apiBase}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=100&fields=${fields}` +
+      (nextPageToken ? `&nextPageToken=${encodeURIComponent(nextPageToken)}` : '');
+    const res = await fetch(url, { headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`Jira API error ${res.status}`);
+    const page = await res.json();
+    issues.push(...(page.issues ?? []));
+    nextPageToken = page.isLast === false ? page.nextPageToken : null;
+  } while (nextPageToken && issues.length < MAX_ISSUES);
+  const data = { issues };
+  const waiting = waitingStatuses();
 
   let branchesByRepo = {};
   try {
@@ -241,6 +244,7 @@ export async function getJiraItems() {
       key: issue.key,
       subtitle: issue.fields.status?.name,
       inProgress: issue.fields.status?.statusCategory?.key === 'indeterminate',
+      waitingOnOthers: waiting.has((issue.fields.status?.name ?? '').toLowerCase()),
       priority: issue.fields.priority?.name ?? null,
       createdAt: issue.fields.created,
       updatedAt: issue.fields.updated

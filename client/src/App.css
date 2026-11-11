@@ -896,3 +896,34 @@ select.item-action { background: var(--bg); }
   font-size: 0.75rem;
   opacity: 0.7;
 }
+
+.header-alert {
+  margin-left: 0.75rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.today-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.today-day {
+  margin-top: 0.75rem;
+}
+
+.today-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.asked-section .orphan-info {
+  gap: 0.35rem;
+}

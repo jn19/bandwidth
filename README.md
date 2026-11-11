@@ -45,7 +45,7 @@ Everything except the terminal works the same on Linux. "Open in Code" runs `cod
 For **Resume** and **Assign to Claude**, set `BANDWIDTH_LAUNCHER` to a program that opens a terminal. It's run without a shell as:
 
 ```
-<launcher> <cwd> <title> [--prompt-file <file>] -- <claude args...>
+<launcher> <cwd> <title> [--prompt-file <file>] [--prefill <text>] -- <claude args...>
 ```
 
 `scripts/launch-wsl-terminal.sh` does this for WSL + Windows Terminal: it opens a new tab in your distro and runs `claude` in an interactive bash (so a `claude` function in `~/.bashrc` still applies). Set `BANDWIDTH_TMUX=1` to run it inside a new tmux session, named `BANDWIDTH_TMUX_PREFIX` + the folder name. On macOS the built-in Terminal.app path is used unless `BANDWIDTH_LAUNCHER` is set.
@@ -69,6 +69,15 @@ For **Resume** and **Assign to Claude**, set `BANDWIDTH_LAUNCHER` to a program t
 | `NOTES_PROJECTS_SUBDIR` | Optional. With it, a note under `NOTES_DIR/<subdir>/<project>/` belongs to that project folder, which drives the project guess (e.g. `Projects` for an Obsidian vault laid out by project) |
 | `PROJECT_GUESS_EXCLUDE` | Optional, comma-separated. Projects never guessed, e.g. a weekly-roundup project whose notes mention every issue |
 | `CLAUDE_INCLUDE_HEADLESS` | `true` also lists `claude -p` / SDK runs under Claude projects (hidden by default) |
+| `JIRA_WAITING_STATUSES` | Optional, comma-separated. Statuses where the next move is someone else's (e.g. `Awaiting Approval,Blocked`); those issues go to **Waiting on others** instead of In flight |
+| `SESSION_STATE_DIR` | Optional. Folder of JSON files written by a Claude Code hook, one per live session: `{ session_id, state: idle\|busy\|waiting, ts, pane? }`. Shows each running session's state and sorts sessions waiting on you first |
+| `FOCUS_URL_TEMPLATE` | Optional. Link that brings a running session's terminal to the front, with `{title}` `{project}` (URL-encoded) or `{title64}` `{project64}` (base64url) placeholders |
+| `CONTEXT_WARN_TOKENS` | Running sessions at or above this context size are flagged "save & clear" (default `400000`) |
+| `FEED_COMMAND` | Optional. Program (run without a shell, 20 s timeout) that prints a JSON array of extra items: `{ id, title, url?, source?, subtitle?, updatedAt?, key?, signal? }`. Items whose `key` matches a Jira card become a signal on it; the rest are listed under **Asked of you** |
+| `PERSONAL_PROJECTS_FILE` | Optional. Project names (one per line, or `- name` bullets in a markdown file) shown in a separate, collapsed **Personal projects** section |
+| `BADGE_PROJECTS_FILE` / `BADGE_LABEL` | Optional. Project names that get a badge (e.g. compliance scope) and its label |
+| `JOURNAL_FILE` | Optional. Daily journal path with a `{date}` placeholder (`YYYY-MM-DD`). Its `- ` bullets show in the **Today** panel, with **Copy for standup** |
+| `NEW_SESSION_PREFILL` | Optional. Text typed (not sent) into a session started with **New session**, e.g. a slash command. Needs a launcher that supports `--prefill` |
 | `BRIEF_APPENDIX_FILE` | Optional. Markdown added to the end of every "Assign to Claude" brief, for your own conventions |
 | `BANDWIDTH_LAUNCHER` | Terminal launcher for Resume / Assign on Linux and WSL (see below) |
 | `HOST` | Interface to listen on (default: `127.0.0.1`) |
@@ -105,6 +114,10 @@ Jira items also get a worktree button. If a local branch already mentions the is
 **Claude projects**: with `CLAUDE_PROJECT_DIRS` set, a section lists recent Claude Code sessions grouped by project folder, with the same Resume and Copy command buttons. Projects where Claude is running come first.
 
 **Project folders for Jira issues**: with `CLAUDE_PROJECT_DIRS` set, every Jira card has a **Project** picker, so work that lives in a plain folder (not a git repo) still gets a home. It defaults to your earlier choice for that issue, else a guess: the project with the most notes (`NOTES_PROJECTS_SUBDIR`) and Claude Code memory files (`~/.claude/projects/<folder>/memory/`) naming the issue. **Assign to Claude** then opens Claude in that folder with the issue loaded, no worktree needed (and the brief says not to commit unless asked). Worktree buttons appear only when the issue is code: a local branch names it, or its project is a git repo.
+
+**Your Claude sessions at a glance**: with `SESSION_STATE_DIR`, each running session shows *waiting on you*, *working* or *idle*, sessions waiting on you sort first, and the header counts them. Each session shows its context size; running ones past `CONTEXT_WARN_TOKENS` say "save & clear". **Focus** (with `FOCUS_URL_TEMPLATE`) jumps to the session's terminal, and **New session** starts a fresh one in that project.
+
+**Activity that isn't in Jira**: a ticket's "last activity" also counts notes and Claude memory files naming it, and Claude sessions whose title or last prompt names it, so work done elsewhere keeps it from looking stalled. Jira results are paged, up to 500 issues.
 
 **Related notes**: with `NOTES_DIR` set, Jira cards list the markdown notes whose frontmatter names the issue (`tickets: [KEY-1]`), and "Assign to Claude" tells Claude to read them first.
 

@@ -7,7 +7,10 @@ import InFlight from './components/InFlight.jsx';
 import Snoozed from './components/Snoozed.jsx';
 import ClaudeSessions from './components/ClaudeSessions.jsx';
 import ClaudeProjects from './components/ClaudeProjects.jsx';
-import { buildInFlight } from './inFlight.js';
+import WaitingOnOthers from './components/WaitingOnOthers.jsx';
+import AskedOfYou from './components/AskedOfYou.jsx';
+import TodayPanel from './components/TodayPanel.jsx';
+import { buildInFlight, isSnoozed } from './inFlight.js';
 import { ProjectsContext } from './projectsContext.js';
 import { byUrgency } from './urgency.js';
 import { parseQuery, matches, worktreeMatches } from './search.js';
@@ -29,6 +32,9 @@ export default function App() {
   const [jiraReadOnly, setJiraReadOnly] = useState(false);
   const [claudeProjects, setClaudeProjects] = useState([]);
   const [allProjects, setAllProjects] = useState([]);
+  const [contextWarnTokens, setContextWarnTokens] = useState(400000);
+  const [feed, setFeed] = useState([]);
+  const [journal, setJournal] = useState(null);
   const [repos, setRepos] = useState([]);
   const [annotations, setAnnotations] = useState({});
   const [commitments, setCommitments] = useState([]);
@@ -51,7 +57,11 @@ export default function App() {
   useEffect(() => {
     fetch('/api/config')
       .then(r => r.json())
-      .then(c => { setSpotlightProject(c.spotlightProject || null); setJiraReadOnly(!!c.jiraReadOnly); })
+      .then(c => {
+        setSpotlightProject(c.spotlightProject || null);
+        setJiraReadOnly(!!c.jiraReadOnly);
+        if (c.contextWarnTokens) setContextWarnTokens(c.contextWarnTokens);
+      })
       .catch(() => {});
     fetch('/api/repos')
       .then(r => r.json())
@@ -67,13 +77,20 @@ export default function App() {
     setRefreshing(true);
     const errs = [];
 
-    const [githubRes, jiraRes, stateRes, notesRes, projectsRes] = await Promise.allSettled([
+    const [githubRes, jiraRes, stateRes, notesRes, projectsRes, feedRes, journalRes] = await Promise.allSettled([
       fetch('/api/github/items').then(r => r.json()),
       fetch('/api/jira/items').then(r => r.json()),
       fetch('/api/state').then(r => r.json()),
       fetch('/api/notes/tickets').then(r => r.json()),
-      fetch('/api/claude/projects').then(r => r.json())
+      fetch('/api/claude/projects').then(r => r.json()),
+      fetch('/api/feed?fresh=1').then(r => r.json()),
+      fetch('/api/journal').then(r => r.json())
     ]);
+    const feedItems = feedRes.status === 'fulfilled' && Array.isArray(feedRes.value) ? feedRes.value : [];
+    if (feedRes.status === 'fulfilled' && feedRes.value?.error) errs.push('Feed: ' + feedRes.value.error);
+    setJournal(journalRes.status === 'fulfilled' && !journalRes.value?.error ? journalRes.value : null);
+    const signalsByKey = {};
+    for (const f of feedItems) if (f.key) (signalsByKey[f.key] ??= []).push({ label: f.signal || f.title, url: f.url });
     const notesByKey = notesRes.status === 'fulfilled' && !notesRes.value.error ? notesRes.value : {};
     setClaudeProjects(projectsRes.status === 'fulfilled' && Array.isArray(projectsRes.value) ? projectsRes.value : []);
 
@@ -89,13 +106,22 @@ export default function App() {
       : (errs.push('GitHub: ' + (githubRes.reason?.message || 'failed')), []);
 
     const jiraItems = jiraRes.status === 'fulfilled' && Array.isArray(jiraRes.value)
-      ? jiraRes.value.map(i => (notesByKey[i.key]
-        ? { ...i, notes: notesByKey[i.key].notes, projectGuess: notesByKey[i.key].project }
-        : i))
+      ? jiraRes.value.map(i => ({
+        ...i,
+        ...(notesByKey[i.key] && {
+          notes: notesByKey[i.key].notes,
+          projectGuess: notesByKey[i.key].project,
+          localActivityAt: notesByKey[i.key].localActivityAt
+        }),
+        ...(signalsByKey[i.key] && { feedSignals: signalsByKey[i.key] })
+      }))
       : (errs.push('Jira: ' + (jiraRes.reason?.message || jiraRes.value?.error || 'failed')), []);
 
     const allItems = [...githubItems, ...jiraItems];
     setItems(allItems);
+    // Feed items about a card on the page became its signals; the rest are "Asked of you"
+    const onPage = new Set(jiraItems.map(i => i.key));
+    setFeed(feedItems.filter(f => !(f.key && onPage.has(f.key))));
     setErrors(errs);
 
     // Fetch all worktrees across all repos in one call
@@ -225,7 +251,15 @@ export default function App() {
     .map(([key, wt]) => ({ key, ...wt }))
     .filter(wt => worktreeMatches(terms, wt));
   const visibleProjects = claudeProjects.filter(p => matches(terms, { title: p.name }, p, null));
-  const matchCount = visibleProjects.length + visibleEntries.length + visibleDormant.length + visibleSnoozed.length +
+  const workProjects = visibleProjects.filter(p => !p.personal);
+  const personalProjects = visibleProjects.filter(p => p.personal);
+  const waitingSessions = claudeProjects.flatMap(p => p.claudeSessions).filter(s => s.state === 'waiting').length;
+  const visibleWaiting = inFlight.waiting.filter(entryMatches);
+  const visibleAsked = feed
+    .filter(f => !isSnoozed(annotations[f.id]))
+    .filter(f => matches(terms, { title: `${f.title} ${f.subtitle ?? ''} ${f.source}` }, null, annotations[f.id]))
+    .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+  const matchCount = visibleProjects.length + visibleWaiting.length + visibleAsked.length + visibleEntries.length + visibleDormant.length + visibleSnoozed.length +
     visibleQueued.length + orphanWorktrees.length;
 
   async function handleRemoveOrphan(wt) {
@@ -250,7 +284,7 @@ export default function App() {
   }
 
   return (
-    <ProjectsContext.Provider value={{ all: allProjects, recent: claudeProjects }}>
+    <ProjectsContext.Provider value={{ all: allProjects, recent: claudeProjects, contextWarnTokens }}>
     <div className="app">
       <header className="app-header">
         <div className="header-top">
@@ -260,7 +294,12 @@ export default function App() {
               <p className="item-count">
                 {searching
                   ? `${matchCount} match${matchCount !== 1 ? 'es' : ''}`
-                  : `${inFlight.entries.length} in flight · ${queuedItems.length} queued`}
+                  : `${inFlight.entries.length} in flight · ${inFlight.waiting.length} waiting on others · ${queuedItems.length} queued`}
+                {waitingSessions > 0 && (
+                  <a className="header-alert" href="#claude-projects">
+                    {waitingSessions} Claude session{waitingSessions !== 1 ? 's' : ''} waiting on you
+                  </a>
+                )}
               </p>
             )}
           </div>
@@ -300,6 +339,7 @@ export default function App() {
           </div>
         ) : (
           <>
+            <TodayPanel journal={journal} />
             <InFlight
               entries={visibleEntries}
               dormant={visibleDormant}
@@ -311,9 +351,17 @@ export default function App() {
               onCreateWorktree={handleCreateWorktree}
               onRemoveWorktree={handleRemoveWorktree}
             />
+            <AskedOfYou items={visibleAsked} onAnnotate={handleAnnotate} />
             <NewWorktree repos={repos} onCreate={handleCreateAdHocWorktree} />
             {!jiraReadOnly && <NewJiraIssue onCreated={fetchAll} />}
-            <ClaudeProjects projects={visibleProjects} searching={searching} />
+            <ClaudeProjects projects={workProjects} searching={searching} />
+            <ClaudeProjects
+              projects={personalProjects}
+              searching={searching}
+              title="Personal projects"
+              hint="Recent sessions in your personal projects."
+              startCollapsed
+            />
             <div className="categories-grid">
               {grouped.map(cat => (
                 <WorkCategory
@@ -329,6 +377,14 @@ export default function App() {
                 />
               ))}
             </div>
+            <WaitingOnOthers
+              entries={visibleWaiting}
+              searching={searching}
+              repos={repos}
+              onAnnotate={handleAnnotate}
+              onCreateWorktree={handleCreateWorktree}
+              onRemoveWorktree={handleRemoveWorktree}
+            />
             <Snoozed
               entries={visibleSnoozed}
               searching={searching}

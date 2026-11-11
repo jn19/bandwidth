@@ -60,6 +60,7 @@ async function readNote(path) {
         title: basename(path, '.md'),
         path,
         project: projectOf(path),
+        modifiedAt: mtimeMs,
         date: fm.match(DATE_RE)?.[1] ?? null,
         summary: fm.match(SUMMARY_RE)?.[1]?.slice(0, 300) ?? null,
         keys
@@ -95,11 +96,12 @@ const MEMORY_ROOT = join(homedir(), '.claude', 'projects');
 const KEY_IN_TEXT = /\b[A-Z][A-Z0-9_]*-\d+\b/g;
 const memoryCache = new Map(); // file -> { mtimeMs, keys }
 
-// { [jiraKey]: Map(projectName -> memory files naming it) }. Claude Code names
+// { counts: { [jiraKey]: Map(projectName -> memory files naming it) },
+//   latest: { [jiraKey]: newest mtime (ms) of those files } }. Claude Code names
 // each project's folder after its path with every non-alphanumeric turned into '-'.
 async function memoryMentions(all) {
   const byFolder = new Map(all.map(p => [p.path.replace(/[^A-Za-z0-9]/g, '-'), p.name]));
-  const out = {};
+  const out = {}, latest = {};
   for (const [folder, name] of byFolder) {
     const dir = join(MEMORY_ROOT, folder, 'memory');
     const files = (await readdir(dir).catch(() => [])).filter(f => f.endsWith('.md') && f !== 'MEMORY.md');
@@ -116,11 +118,12 @@ async function memoryMentions(all) {
         for (const key of cached.keys) {
           const m = (out[key] ??= new Map());
           m.set(name, (m.get(name) ?? 0) + 1);
+          latest[key] = Math.max(latest[key] ?? 0, mtimeMs);
         }
       } catch {}
     }
   }
-  return out;
+  return { counts: out, latest };
 }
 
 // The project with the most notes plus memory files about the issue (ties: the
@@ -157,17 +160,35 @@ export function orderNotes(notes, projectName, excluded = new Set(
   return [...notes].sort((a, b) => rank(a) - rank(b) || (b.date ?? '').localeCompare(a.date ?? ''));
 }
 
-// { [jiraKey]: { notes: [...], project: { name, path, isRepo, noteCount, memoryCount } | null } }
-export async function ticketContext() {
+
+// { [jiraKey]: { notes: [...], project: { name, path, isRepo, noteCount, memoryCount } | null,
+//   localActivityAt: ISO | null } }. Local activity = the newest note or memory
+// file naming the issue, or (with `sessions`) a Claude session whose title or
+// last prompt names it, so work done outside Jira keeps a ticket from going stale.
+export async function ticketContext({ sessions = [] } = {}) {
   const all = await listAllProjects();
-  const [byKey, memory] = await Promise.all([notesByTicket(), memoryMentions(all)]);
+  const [byKey, mem] = await Promise.all([notesByTicket(), memoryMentions(all)]);
+  const memory = mem.counts;
+  const activity = { ...mem.latest };
+  const bump = (key, t) => { if (t) activity[key] = Math.max(activity[key] ?? 0, Math.min(t, Date.now())); };
+  // A note's file time is when it was last written, which a frontmatter date isn't
+  for (const [key, notes] of Object.entries(byKey)) for (const n of notes) bump(key, n.modifiedAt);
+  for (const s of sessions) {
+    for (const key of new Set(`${s.title ?? ''}\n${s.lastPrompt ?? ''}`.match(KEY_IN_TEXT) ?? [])) {
+      bump(key, Date.parse(s.lastActiveAt));
+    }
+  }
   const projects = new Map(all.map(p => [p.name, { path: p.path, isRepo: p.isRepo }]));
   const excluded = new Set((process.env.PROJECT_GUESS_EXCLUDE || '').split(',').map(s => s.trim()).filter(Boolean));
   const out = {};
-  for (const key of new Set([...Object.keys(byKey), ...Object.keys(memory)])) {
+  for (const key of new Set([...Object.keys(byKey), ...Object.keys(memory), ...Object.keys(activity)])) {
     const notes = byKey[key] ?? [];
     const project = guessProject(notes, memory[key], projects, excluded);
-    out[key] = { notes: orderNotes(notes, project?.name, excluded), project };
+    out[key] = {
+      notes: orderNotes(notes, project?.name, excluded),
+      project,
+      localActivityAt: activity[key] ? new Date(activity[key]).toISOString() : null
+    };
   }
   return out;
 }

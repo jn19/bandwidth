@@ -68,7 +68,11 @@ export default function ProjectPicker({ item, annotation, onAnnotate, hideAssign
           onChange={e => onAnnotate?.(item, { project: e.target.value || null })}
         >
           <option value="">Pick a project…</option>
-          {all.map(p => <option key={p.path} value={p.name}>{p.name}{p.isRepo ? '  (git)' : ''}</option>)}
+          {all.map(p => (
+            <option key={p.path} value={p.name}>
+              {p.name}{p.isRepo ? '  (git)' : ''}{p.badge ? `  · ${p.badge}` : ''}{p.personal ? '  · personal' : ''}
+            </option>
+          ))}
         </select>
       </div>
       {guessed && <span className="item-project-hint">{guessHint(item.projectGuess)}</span>}
@@ -81,6 +85,7 @@ export default function ProjectPicker({ item, annotation, onAnnotate, hideAssign
             </button>
           )}
           <button className="worktree-btn open" onClick={open}>Open in Code</button>
+          {chosen.badge && <span className="badge badge-priority">{chosen.badge}</span>}
           {running && <span className="signal signal-live">Claude running</span>}
         </div>
       )}

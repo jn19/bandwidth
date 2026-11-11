@@ -58,6 +58,9 @@ function describe(item, worktree, annotation, now) {
   const due = item.dueDate && dueSignal(item.dueDate, now);
   if (due) signals.push(due);
 
+  // From FEED_COMMAND: e.g. someone replied on the ticket. Always actionable.
+  for (const f of item.feedSignals ?? []) signals.push({ label: f.label, tone: 'alert' });
+
   const prSignal = PR_STATE_SIGNALS[item.prState];
   if (prSignal) signals.push(prSignal);
   if (item.checks === 'failing') signals.push({ label: 'CI failing', tone: 'alert' });
@@ -72,7 +75,7 @@ function describe(item, worktree, annotation, now) {
 
   const lastTouched = latestTimestamp(
     item.updatedAt, worktree?.lastCommitAt, worktree?.lastEditAt, worktree?.lastSessionAt,
-    annotation?.updatedAt
+    annotation?.updatedAt, item.localActivityAt
   );
   const idleMs = lastTouched ? now - lastTouched : null;
   const stale = idleMs !== null && idleMs > STALE_AFTER_DAYS * DAY;
@@ -92,10 +95,12 @@ function describe(item, worktree, annotation, now) {
 // Work you've already started or committed to: pinned items, your commitments,
 // your open PRs, Jira issues in an in-progress status, anything with a worktree,
 // and ad-hoc worktrees with uncommitted changes or a running Claude session.
-// Snoozed items are set aside.
+// Snoozed items are set aside. Jira issues in a JIRA_WAITING_STATUSES status go
+// to `waiting` (the next move is someone else's) unless pinned or replied to.
 export function buildInFlight(items, worktrees, { annotations = {}, commitments = [] } = {}, now = Date.now()) {
   const entries = [];
   const snoozed = [];
+  const waiting = [];
   const itemIds = new Set();     // handled here (in flight or snoozed) — kept out of the categories
   const worktreeKeys = new Set(); // claimed worktrees — kept out of "stale worktrees"
 
@@ -104,6 +109,9 @@ export function buildInFlight(items, worktrees, { annotations = {}, commitments 
     if (isSnoozed(annotation, now)) {
       itemIds.add(item.id);
       snoozed.push({ item, worktree, annotation });
+    } else if (item.waitingOnOthers && !annotation?.pinned && !item.feedSignals?.length) {
+      itemIds.add(item.id);
+      waiting.push(describe(item, worktree, annotation, now));
     } else if (startedWork || annotation?.pinned) {
       itemIds.add(item.id);
       entries.push(describe(item, worktree, annotation, now));
@@ -116,7 +124,7 @@ export function buildInFlight(items, worktrees, { annotations = {}, commitments 
     const key = item.repoName && item.branch ? `${item.repoName}/${item.branch}` : null;
     const worktree = key ? worktrees[key] : null;
     if (worktree) worktreeKeys.add(key);
-    consider(item, worktree, item.role === 'author' || item.inProgress || !!worktree);
+    consider(item, worktree, item.role === 'author' || item.inProgress || !!worktree || !!item.feedSignals?.length);
   }
 
   for (const [key, wt] of Object.entries(worktrees)) {
@@ -147,6 +155,7 @@ export function buildInFlight(items, worktrees, { annotations = {}, commitments 
     entries: entries.filter(e => !e.dormant),
     dormant: entries.filter(e => e.dormant),
     snoozed,
+    waiting: waiting.sort((a, b) => (b.idleMs ?? 0) - (a.idleMs ?? 0)),
     itemIds,
     worktreeKeys
   };

@@ -11,6 +11,8 @@ import stateRoutes from './routes/state.js';
 import claudeRoutes from './routes/claude.js';
 import notesRoutes from './routes/notes.js';
 import { localOnly } from './security.js';
+import { getFeed } from './services/feed.js';
+import { getJournal } from './services/journal.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, '../.env') });
@@ -26,8 +28,23 @@ app.use(express.json());
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 app.get('/api/config', (_, res) => res.json({
   spotlightProject: process.env.JIRA_SPOTLIGHT_PROJECT || null,
-  jiraReadOnly: process.env.JIRA_READ_ONLY === 'true'
+  jiraReadOnly: process.env.JIRA_READ_ONLY === 'true',
+  contextWarnTokens: Number(process.env.CONTEXT_WARN_TOKENS) || 400000
 }));
+app.get('/api/feed', async (req, res) => {
+  try {
+    res.json(await getFeed({ fresh: req.query.fresh === '1' }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.get('/api/journal', async (_req, res) => {
+  try {
+    res.json(await getJournal());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.use('/api/github', githubRoutes);
 app.use('/api/jira', jiraRoutes);
 app.use('/api/worktrees', worktreeRoutes);

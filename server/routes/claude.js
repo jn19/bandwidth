@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { resumeSession, assignToClaude, listClaudeProjects } from '../services/claude.js';
+import { resumeSession, assignToClaude, listClaudeProjects, newSession } from '../services/claude.js';
 import { listAllProjects } from '../services/projects.js';
 
 const router = Router();
@@ -28,6 +28,16 @@ router.post('/resume', async (req, res) => {
 router.get('/projects/all', async (_req, res) => {
   try {
     res.json(await listAllProjects());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/new', async (req, res) => {
+  if (!req.body.projectPath) return res.status(400).json({ error: 'projectPath is required' });
+  try {
+    await newSession(req.body.projectPath);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
