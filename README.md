@@ -23,10 +23,32 @@ cp .env.example .env
 ## Running
 
 ```bash
-npm run dev
+npm run dev     # development: Vite on http://localhost:5173, API on :3001
+npm start       # build the page once and serve everything from http://localhost:3001
 ```
 
-Opens at `http://localhost:5173`. The Express API runs on `:3001`.
+## Security
+
+The API can open terminals, run git and read your Claude Code transcripts, so it only answers the local machine:
+
+- The server listens on `127.0.0.1` only (`HOST` changes that; don't, unless you add authentication).
+- Requests must name a loopback host (`localhost`, `127.0.0.1`), which blocks DNS-rebinding attacks.
+- Browser requests from other sites are refused: a non-loopback `Origin` or `Sec-Fetch-Site: cross-site` gets a 403. There is no CORS.
+- Repo and branch names are validated before they reach git; remove and open only act on worktrees git lists (plus Claude project folders and indexed notes for open).
+- Terminals and editors the server starts don't inherit its credentials (any env var named like a token, secret, password or API key is dropped).
+- `server/data/` (your notes, pins and the task briefs, which include Jira text) is gitignored.
+
+## Linux and WSL
+
+Everything except the terminal works the same on Linux. "Open in Code" runs `code <path>` (`CODE_COMMAND` overrides it); in WSL that opens Windows VS Code attached to WSL. "Claude running" is detected from `/proc`, so `lsof` isn't needed.
+
+For **Resume** and **Assign to Claude**, set `BANDWIDTH_LAUNCHER` to a program that opens a terminal. It's run without a shell as:
+
+```
+<launcher> <cwd> <title> [--prompt-file <file>] -- <claude args...>
+```
+
+`scripts/launch-wsl-terminal.sh` does this for WSL + Windows Terminal: it opens a new tab in your distro and runs `claude` in an interactive bash (so a `claude` function in `~/.bashrc` still applies). Set `BANDWIDTH_TMUX=1` to run it inside a new tmux session, named `BANDWIDTH_TMUX_PREFIX` + the folder name. On macOS the built-in Terminal.app path is used unless `BANDWIDTH_LAUNCHER` is set.
 
 ## Configuration (`.env`)
 
@@ -39,6 +61,14 @@ Opens at `http://localhost:5173`. The Express API runs on `:3001`.
 | `JIRA_SPOTLIGHT_PROJECT` | A project key that gets its own dedicated column, e.g. `SOC` |
 | `LOCAL_REPO_BASE` | Parent directory of your local git repos (default: `~/development`) |
 | `GITHUB_INCLUDE_ISSUES` | Set to `false` to hide assigned GitHub issues and only show PRs (default: `true`) |
+| `JIRA_API_BASE` | Optional. For a **scoped** API token, which must go through Atlassian's gateway: `https://api.atlassian.com/ex/jira/<cloudId>`. Links still use `JIRA_HOST` |
+| `JIRA_READ_ONLY` | `true` hides the New Jira issue form and refuses any Jira write. Use it with a read-only token |
+| `CLAUDE_PROJECT_DIRS` | Optional, colon-separated. Folders whose subfolders are Claude Code projects; their sessions are listed under **Claude projects**, even outside git worktrees |
+| `CLAUDE_PROJECT_DAYS` | How far back **Claude projects** looks (default: `14`) |
+| `NOTES_DIR` | Optional. A folder of markdown notes (e.g. an Obsidian vault). A note whose frontmatter has `tickets: [KEY-1]` is shown on that Jira card and listed in its Claude brief |
+| `BRIEF_APPENDIX_FILE` | Optional. Markdown added to the end of every "Assign to Claude" brief, for your own conventions |
+| `BANDWIDTH_LAUNCHER` | Terminal launcher for Resume / Assign on Linux and WSL (see below) |
+| `HOST` | Interface to listen on (default: `127.0.0.1`) |
 
 GitHub auth is handled entirely by the `gh` CLI — no token needed in `.env`.
 
@@ -69,4 +99,8 @@ Jira items also get a worktree button. If a local branch already mentions the is
 
 **New Jira issue**: pick a board, an issue type and a summary (plus an optional description), and tick **Assign to me** to have it land on your dashboard right away. Boards for the projects in `JIRA_PROJECT_KEYS` are listed first, and your last board is remembered. On a scrum board, the new issue goes to the backlog.
 
-**"Open in Code" prerequisite** — the server uses `open -a "Visual Studio Code"` on macOS. VS Code must be installed in `/Applications`; the `code` CLI itself is not required.
+**Claude projects**: with `CLAUDE_PROJECT_DIRS` set, a section lists recent Claude Code sessions grouped by project folder, with the same Resume and Copy command buttons. Projects where Claude is running come first.
+
+**Related notes**: with `NOTES_DIR` set, Jira cards list the markdown notes whose frontmatter names the issue (`tickets: [KEY-1]`), and "Assign to Claude" tells Claude to read them first.
+
+**"Open in Code" prerequisite** — the server uses `open -a "Visual Studio Code"` on macOS. VS Code must be installed in `/Applications`; the `code` CLI itself is not required. On Linux and WSL it runs `code`.

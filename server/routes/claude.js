@@ -1,7 +1,15 @@
 import { Router } from 'express';
-import { resumeSession, assignToClaude } from '../services/claude.js';
+import { resumeSession, assignToClaude, listClaudeProjects } from '../services/claude.js';
 
 const router = Router();
+
+router.get('/projects', async (_req, res) => {
+  try {
+    res.json(await listClaudeProjects());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.post('/resume', async (req, res) => {
   const { sessionId } = req.body;

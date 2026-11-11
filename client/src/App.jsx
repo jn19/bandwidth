@@ -6,6 +6,7 @@ import NewJiraIssue from './components/NewJiraIssue.jsx';
 import InFlight from './components/InFlight.jsx';
 import Snoozed from './components/Snoozed.jsx';
 import ClaudeSessions from './components/ClaudeSessions.jsx';
+import ClaudeProjects from './components/ClaudeProjects.jsx';
 import { buildInFlight } from './inFlight.js';
 import { byUrgency } from './urgency.js';
 import { parseQuery, matches, worktreeMatches } from './search.js';
@@ -24,6 +25,8 @@ export default function App() {
   const [errors, setErrors] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
   const [spotlightProject, setSpotlightProject] = useState(null);
+  const [jiraReadOnly, setJiraReadOnly] = useState(false);
+  const [claudeProjects, setClaudeProjects] = useState([]);
   const [repos, setRepos] = useState([]);
   const [annotations, setAnnotations] = useState({});
   const [commitments, setCommitments] = useState([]);
@@ -46,7 +49,7 @@ export default function App() {
   useEffect(() => {
     fetch('/api/config')
       .then(r => r.json())
-      .then(c => setSpotlightProject(c.spotlightProject || null))
+      .then(c => { setSpotlightProject(c.spotlightProject || null); setJiraReadOnly(!!c.jiraReadOnly); })
       .catch(() => {});
     fetch('/api/repos')
       .then(r => r.json())
@@ -58,11 +61,15 @@ export default function App() {
     setRefreshing(true);
     const errs = [];
 
-    const [githubRes, jiraRes, stateRes] = await Promise.allSettled([
+    const [githubRes, jiraRes, stateRes, notesRes, projectsRes] = await Promise.allSettled([
       fetch('/api/github/items').then(r => r.json()),
       fetch('/api/jira/items').then(r => r.json()),
-      fetch('/api/state').then(r => r.json())
+      fetch('/api/state').then(r => r.json()),
+      fetch('/api/notes/tickets').then(r => r.json()),
+      fetch('/api/claude/projects').then(r => r.json())
     ]);
+    const notesByKey = notesRes.status === 'fulfilled' && !notesRes.value.error ? notesRes.value : {};
+    setClaudeProjects(projectsRes.status === 'fulfilled' && Array.isArray(projectsRes.value) ? projectsRes.value : []);
 
     if (stateRes.status === 'fulfilled' && !stateRes.value.error) {
       setAnnotations(stateRes.value.annotations || {});
@@ -76,8 +83,8 @@ export default function App() {
       : (errs.push('GitHub: ' + (githubRes.reason?.message || 'failed')), []);
 
     const jiraItems = jiraRes.status === 'fulfilled' && Array.isArray(jiraRes.value)
-      ? jiraRes.value
-      : (errs.push('Jira: ' + (jiraRes.reason?.message || 'failed')), []);
+      ? jiraRes.value.map(i => (notesByKey[i.key] ? { ...i, notes: notesByKey[i.key] } : i))
+      : (errs.push('Jira: ' + (jiraRes.reason?.message || jiraRes.value?.error || 'failed')), []);
 
     const allItems = [...githubItems, ...jiraItems];
     setItems(allItems);
@@ -209,7 +216,8 @@ export default function App() {
     .filter(([key]) => !activeKeys.has(key) && !inFlight.worktreeKeys.has(key))
     .map(([key, wt]) => ({ key, ...wt }))
     .filter(wt => worktreeMatches(terms, wt));
-  const matchCount = visibleEntries.length + visibleDormant.length + visibleSnoozed.length +
+  const visibleProjects = claudeProjects.filter(p => matches(terms, { title: p.name }, p, null));
+  const matchCount = visibleProjects.length + visibleEntries.length + visibleDormant.length + visibleSnoozed.length +
     visibleQueued.length + orphanWorktrees.length;
 
   async function handleRemoveOrphan(wt) {
@@ -295,7 +303,8 @@ export default function App() {
               onRemoveWorktree={handleRemoveWorktree}
             />
             <NewWorktree repos={repos} onCreate={handleCreateAdHocWorktree} />
-            <NewJiraIssue onCreated={fetchAll} />
+            {!jiraReadOnly && <NewJiraIssue onCreated={fetchAll} />}
+            <ClaudeProjects projects={visibleProjects} searching={searching} />
             <div className="categories-grid">
               {grouped.map(cat => (
                 <WorkCategory

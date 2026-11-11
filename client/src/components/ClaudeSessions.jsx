@@ -15,7 +15,7 @@ function Session({ session }) {
         body: JSON.stringify({ sessionId: session.id })
       });
       const data = await res.json();
-      setStatus(data.error ? { error: data.error } : { ok: 'Opened in Terminal' });
+      setStatus(data.error ? { error: data.error } : { ok: 'Opened in a terminal' });
     } catch (e) {
       setStatus({ error: e.message });
     }

@@ -1,19 +1,26 @@
-import simpleGit from 'simple-git';
+import { simpleGit } from 'simple-git';
 import { spawn } from 'child_process';
 import { join } from 'path';
 import { homedir } from 'os';
 import { existsSync, readdirSync, statSync } from 'fs';
+import { assertRepoName, assertBranchName, childEnv } from '../security.js';
 
 function resolveBase() {
   const base = process.env.LOCAL_REPO_BASE || '~/development';
   return base.replace(/^~/, homedir());
 }
 
+// Folders whose names the API will accept back as a repo name
+const VALID_NAME = /^[\w.-]+$/;
+
 function getRepoPath(repoName) {
+  assertRepoName(repoName);
   return join(resolveBase(), repoName);
 }
 
 function getWorktreePath(repoName, branch) {
+  assertRepoName(repoName);
+  assertBranchName(branch);
   const safeBranch = branch.replace(/\//g, '-');
   return join(resolveBase(), `${repoName}-worktrees`, safeBranch);
 }
@@ -47,7 +54,7 @@ export async function listAllWorktrees() {
   const repoNames = entries
     .filter(e => e.isDirectory() && e.name.endsWith('-worktrees'))
     .map(e => e.name.slice(0, -'-worktrees'.length))
-    .filter(name => existsSync(getRepoPath(name)));
+    .filter(name => VALID_NAME.test(name) && existsSync(getRepoPath(name)));
 
   const results = await Promise.all(repoNames.map(async repoName => {
     const wts = await listWorktrees(repoName);
@@ -98,6 +105,7 @@ export async function listWorktrees(repoName) {
 }
 
 export async function createWorktree(repoName, branch) {
+  assertBranchName(branch);
   const repoPath = getRepoPath(repoName);
   if (!existsSync(repoPath)) {
     throw new Error(`Repo not found locally: ${repoPath}`);
@@ -136,6 +144,7 @@ export function listLocalRepos() {
   return entries
     .filter(e => e.isDirectory() && !e.name.endsWith('-worktrees'))
     .map(e => e.name)
+    .filter(name => VALID_NAME.test(name))
     .filter(name => existsSync(join(resolveBase(), name, '.git')));
 }
 
@@ -169,20 +178,37 @@ export async function listAllBranchesAcrossRepos() {
 export async function removeWorktree(repoName, branch) {
   const repoPath = getRepoPath(repoName);
   const worktreePath = getWorktreePath(repoName, branch);
+  // --force discards uncommitted work, so only ever aim it at a worktree git itself lists
+  if (!(await listAllWorktrees()).some(wt => wt.path === worktreePath)) {
+    throw new Error('Worktree not found');
+  }
   const git = simpleGit(repoPath);
   await git.raw(['worktree', 'remove', '--force', worktreePath]);
 }
 
-export function openInCode(worktreePath) {
-  if (!existsSync(worktreePath)) {
-    throw new Error(`Path not found: ${worktreePath}`);
+// Paths the API may open: worktrees git lists, plus extra paths a caller has
+// already checked (Claude project folders, indexed notes)
+export async function openInCode(path, { allowed = [] } = {}) {
+  const worktrees = (await listAllWorktrees()).map(wt => wt.path);
+  if (![...worktrees, ...allowed].includes(path)) throw new Error('Path not allowed');
+  if (!existsSync(path)) throw new Error(`Path not found: ${path}`);
+  if (process.platform === 'darwin') {
+    // Use `open -a` so Launch Services starts VS Code with the user's login env,
+    // not the dev server's (which has nvm shims / a modified PATH).
+    const child = spawn('open', ['-a', 'Visual Studio Code', path], {
+      detached: true,
+      stdio: 'ignore',
+      env: { HOME: process.env.HOME, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }
+    });
+    child.unref();
+    return;
   }
-  // Use `open -a` so Launch Services starts VS Code with the user's login env,
-  // not the dev server's (which has nvm shims / a modified PATH).
-  const child = spawn('open', ['-a', 'Visual Studio Code', worktreePath], {
+  // Linux, including WSL, where `code` opens Windows VS Code attached to WSL
+  const child = spawn(process.env.CODE_COMMAND || 'code', [path], {
     detached: true,
     stdio: 'ignore',
-    env: { HOME: process.env.HOME, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }
+    env: childEnv()
   });
+  child.on('error', () => {});
   child.unref();
 }

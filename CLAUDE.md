@@ -20,7 +20,11 @@ There are no tests or lint scripts configured.
 
 ## Architecture
 
-This is a two-process app: an Express server (`server/`) and a React+Vite client (`client/`). In dev, Vite proxies all `/api/*` requests to `:3001`, so the client never makes cross-origin calls.
+This is a two-process app: an Express server (`server/`) and a React+Vite client (`client/`). In dev, Vite proxies all `/api/*` requests to `:3001`, so the client never makes cross-origin calls. `npm start` builds the client and the server serves `client/dist` itself.
+
+### Security (`server/security.js`)
+
+The server binds `127.0.0.1` (`HOST`). `localOnly` middleware runs before every route: the Host header must be loopback (DNS rebinding), and a present `Origin` must be loopback and `Sec-Fetch-Site` not `cross-site` (other web pages). There is deliberately no CORS. `assertRepoName` / `assertBranchName` guard everything that reaches git; `removeWorktree` and `openInCode` only act on paths `listAllWorktrees()` returns (open also takes Claude project folders and indexed notes). `childEnv()` strips credential-looking env vars from programs the server launches. Keep these when adding routes.
 
 ### Data flow
 
@@ -93,7 +97,9 @@ Other helpers in this module:
 
 `server/services/claude.js` reads Claude Code's transcripts at `~/.claude/projects/*/{sessionId}.jsonl`. It reads only the first 64 KB (for `cwd` and first prompt) and the last 256 KB (for the latest `custom-title` / `ai-title` entry and last typed prompt), and caches the results by mtime and size. `GET /api/worktrees` runs through `attachClaudeSessions()`, which adds `claudeSessions` (newest first), `claudeRunning` and `lastSessionAt` to each worktree by matching session `cwd` to the worktree path. A worktree counts as running when `ps` + `lsof -d cwd` finds a `claude` process inside it; the process can't be tied to a session id, so the newest session there is the one marked `running`.
 
-`POST /api/claude/resume { sessionId }` validates the id as a UUID, looks the session up server-side (the client never sends a path or command), and runs `osascript` to open a Terminal.app window with `cd '{cwd}' && claude --resume {id}`.
+`POST /api/claude/resume { sessionId }` validates the id as a UUID, looks the session up server-side (the client never sends a path or command), and calls `openClaude()`. On macOS that runs `osascript` to open a Terminal.app window with `cd '{cwd}' && claude --resume {id}`; elsewhere it runs `BANDWIDTH_LAUNCHER <cwd> <title> [--prompt-file f] -- <claude args>` without a shell (`scripts/launch-wsl-terminal.sh` is the WSL one). On Linux, running sessions are found through `/proc` instead of `lsof`.
+
+`GET /api/claude/projects` groups sessions by project folder under `CLAUDE_PROJECT_DIRS` (last `CLAUDE_PROJECT_DAYS` days, running first). `GET /api/notes/tickets` (`server/services/notes.js`) indexes `NOTES_DIR` markdown frontmatter `tickets: [KEY-1]` lines, cached by mtime; the client attaches the notes to Jira items as `item.notes`.
 
 `POST /api/claude/assign { item, worktreePath }` ("Assign to Claude" / "Review with Claude" on Jira, PR and issue cards that have a worktree) validates the item's key or repo/number and requires `worktreePath` to be one of `listAllWorktrees()`. `server/services/taskBrief.js` then builds an opening prompt:
 - **Jira:** full issue detail via `getJiraIssueDetail()` (description and last 5 comments, converted from ADF to text).
@@ -101,7 +107,7 @@ Other helpers in this module:
 - **Review-requested PR:** asks for findings only, with no code changes or GitHub posts.
 - **GitHub issue:** tells Claude to run `gh issue view`.
 
-Every brief ends with a working agreement: explore first, ask on ambiguity, commit locally, and never push, PR, comment or change Jira without asking. The brief is written to `server/data/briefs/` and launched in Terminal.app as `claude -n '{title}' "$(cat '{brief}')"`, so the session is interactive and uses the user's default permission mode.
+Every brief ends with a working agreement: explore first, ask on ambiguity, commit locally, and never push, PR, comment or change Jira without asking. Jira briefs list related notes from `NOTES_DIR`, and `BRIEF_APPENDIX_FILE` is appended to every brief. The brief is written to `server/data/briefs/` and launched as `claude -n '{title}' "$(cat '{brief}')"` (Terminal.app, or the launcher with `--prompt-file`), so the session is interactive and uses the user's default permission mode.
 
 Both resume and assign open a Terminal tab whose custom title is the session or item title (other title elements turned off), and export `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` so Claude Code doesn't overwrite it.
 
@@ -125,3 +131,8 @@ Copy `.env.example` to `.env` at the repo root. The server loads it from `../  .
 | `JIRA_SPOTLIGHT_PROJECT` | Project key that gets its own category column |
 | `LOCAL_REPO_BASE` | Parent dir of local repos; defaults to `~/development` |
 | `GITHUB_INCLUDE_ISSUES` | Set to `false` to skip the assigned-issues fetch; PRs only. Defaults to `true` |
+| `JIRA_API_BASE` / `JIRA_READ_ONLY` | Gateway base URL for scoped tokens; `true` refuses Jira writes and hides the create form |
+| `CLAUDE_PROJECT_DIRS` / `CLAUDE_PROJECT_DAYS` | Project folders for the Claude projects section, and how far back it looks |
+| `NOTES_DIR` / `BRIEF_APPENDIX_FILE` | Markdown notes linked by `tickets:` frontmatter; extra text for every brief |
+| `BANDWIDTH_LAUNCHER` | Terminal launcher on Linux/WSL (`BANDWIDTH_TMUX`, `BANDWIDTH_TMUX_PREFIX`, `BANDWIDTH_CLAUDE_CMD` for the WSL script) |
+| `HOST` / `CODE_COMMAND` | Listen address (default `127.0.0.1`); editor command on Linux (default `code`) |

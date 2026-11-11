@@ -41,15 +41,22 @@ function adfToText(node) {
   }
 }
 
+// JIRA_API_BASE is for scoped API tokens, which must go through Atlassian's
+// gateway (https://api.atlassian.com/ex/jira/<cloudId>); links still use JIRA_HOST.
 function jiraConfig() {
-  const { JIRA_HOST, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;
+  const { JIRA_HOST, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_API_BASE } = process.env;
   if (!JIRA_HOST || !JIRA_EMAIL || !JIRA_API_TOKEN) throw new Error('Jira is not configured');
-  return { host: JIRA_HOST, auth: Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64') };
+  return {
+    host: JIRA_HOST,
+    apiBase: (JIRA_API_BASE || `https://${JIRA_HOST}`).replace(/\/+$/, ''),
+    auth: Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64')
+  };
 }
 
 async function jiraFetch(path, { method = 'GET', body } = {}) {
-  const { host, auth } = jiraConfig();
-  const res = await fetch(`https://${host}${path}`, {
+  const { apiBase, auth } = jiraConfig();
+  if (method !== 'GET' && process.env.JIRA_READ_ONLY === 'true') throw new Error('Jira is read-only (JIRA_READ_ONLY)');
+  const res = await fetch(`${apiBase}${path}`, {
     method,
     headers: {
       Authorization: `Basic ${auth}`,
@@ -129,12 +136,9 @@ export async function createJiraIssue({ projectKey, issueTypeId, summary, descri
 
 // Full detail for one issue, for handing off to Claude
 export async function getJiraIssueDetail(key) {
-  const { JIRA_HOST, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;
-  if (!JIRA_HOST || !JIRA_EMAIL || !JIRA_API_TOKEN) throw new Error('Jira is not configured');
-
-  const auth = Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64');
+  const { host: JIRA_HOST, apiBase, auth } = jiraConfig();
   const fields = 'summary,description,issuetype,priority,status,labels,parent,comment';
-  const res = await fetch(`https://${JIRA_HOST}/rest/api/3/issue/${encodeURIComponent(key)}?fields=${fields}`, {
+  const res = await fetch(`${apiBase}/rest/api/3/issue/${encodeURIComponent(key)}?fields=${fields}`, {
     headers: { Authorization: `Basic ${auth}`, Accept: 'application/json' }
   });
   if (!res.ok) throw new Error(`Jira API error ${res.status} fetching ${key}`);
@@ -162,13 +166,15 @@ export async function getJiraItems() {
   const { JIRA_HOST, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT_KEYS } = process.env;
   if (!JIRA_HOST || !JIRA_EMAIL || !JIRA_API_TOKEN) return [];
 
-  const auth = Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64');
+  const { apiBase, auth } = jiraConfig();
+  const keys = (JIRA_PROJECT_KEYS || '').split(',').map(k => k.trim()).filter(Boolean);
+  if (keys.some(k => !PROJECT_KEY_RE.test(k))) throw new Error('Invalid JIRA_PROJECT_KEYS');
   const projectClause = JIRA_PROJECT_KEYS
     ? ` AND project in (${JIRA_PROJECT_KEYS})`
     : '';
   const jql = `assignee = currentUser() AND status not in (Done, Closed, Resolved)${projectClause} ORDER BY updated DESC`;
 
-  const url = `https://${JIRA_HOST}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=50&fields=summary,description,issuetype,priority,status,labels,customfield_10016,updated,created`;
+  const url = `${apiBase}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}&maxResults=50&fields=summary,description,issuetype,priority,status,labels,customfield_10016,updated,created`;
 
   let res;
   try {

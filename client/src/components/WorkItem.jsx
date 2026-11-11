@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { ageLabel, isSnoozed } from '../inFlight.js';
 import { priorityRank, waitingSince } from '../urgency.js';
 import ClaudeSessions from './ClaudeSessions.jsx';
+import RelatedNotes from './RelatedNotes.jsx';
 
 const SOURCE_LABELS = {
   'github-pr':    'PR',
@@ -155,7 +156,7 @@ export default function WorkItem({
         })
       });
       const data = await res.json();
-      setAssignStatus(data.error ? { error: data.error } : { ok: 'Claude started in Terminal' });
+      setAssignStatus(data.error ? { error: data.error } : { ok: 'Claude started in a terminal' });
     } catch (e) {
       setAssignStatus({ error: e.message });
     }
@@ -206,6 +207,8 @@ export default function WorkItem({
       )}
 
       {item.repo && <span className="item-repo">{item.repo}</span>}
+
+      <RelatedNotes notes={item.notes} />
 
       {editingNote ? (
         <textarea

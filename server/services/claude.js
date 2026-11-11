@@ -1,4 +1,4 @@
-import { readdir, stat, open, mkdir, writeFile } from 'fs/promises';
+import { readdir, stat, open, mkdir, writeFile, readlink, readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join, basename, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -6,6 +6,7 @@ import { homedir } from 'os';
 import { execFile, spawn } from 'child_process';
 import { listAllWorktrees } from './git.js';
 import { buildTaskBrief, sessionName } from './taskBrief.js';
+import { childEnv } from '../security.js';
 
 // Claude Code writes one JSONL transcript per session under
 // ~/.claude/projects/{encoded-cwd}/{sessionId}.jsonl. Each entry carries the cwd,
@@ -117,6 +118,7 @@ function execOutput(cmd, args) {
 
 // Working directories of every running `claude` process
 async function runningClaudeCwds() {
+  if (process.platform === 'linux') return runningClaudeCwdsProc();
   const ps = await execOutput('ps', ['-axo', 'pid=,comm=']);
   const pids = ps.split('\n')
     .map(line => line.trim().match(/^(\d+)\s+(.+)$/))
@@ -125,6 +127,26 @@ async function runningClaudeCwds() {
   if (pids.length === 0) return [];
   const out = await execOutput('lsof', ['-a', '-p', pids.join(','), '-d', 'cwd', '-Fn']);
   return out.split('\n').filter(l => l.startsWith('n')).map(l => l.slice(1));
+}
+
+// Linux has /proc, so no lsof needed. Claude Code's process name is `claude`;
+// a `node .../claude` install shows up as node with claude in its argv.
+async function runningClaudeCwdsProc() {
+  const pids = (await readdir('/proc').catch(() => [])).filter(p => /^\d+$/.test(p));
+  const cwds = await Promise.all(pids.map(async pid => {
+    try {
+      const comm = (await readFile(`/proc/${pid}/comm`, 'utf8')).trim();
+      if (comm !== 'claude') {
+        if (comm !== 'node') return null;
+        const argv = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0');
+        if (!argv.slice(1, 3).some(a => basename(a) === 'claude' || a.endsWith('/claude-code/cli.js'))) return null;
+      }
+      return await readlink(`/proc/${pid}/cwd`);
+    } catch {
+      return null;
+    }
+  }));
+  return [...new Set(cwds.filter(Boolean))];
 }
 
 export async function attachClaudeSessions(worktrees) {
@@ -160,7 +182,7 @@ function terminalTitle(s) {
 
 // Opens a Terminal.app tab titled `title`, showing only that title. Claude
 // Code's own title updates are turned off so they don't replace it.
-function openInTerminal(command, title) {
+function openInTerminalApp(command, title) {
   const child = spawn('osascript', [
     '-e', 'tell application "Terminal"',
     '-e', 'activate',
@@ -176,13 +198,82 @@ function openInTerminal(command, title) {
   child.unref();
 }
 
-// Opens a new Terminal.app window resuming the session in its original directory
+// Starts `claude <args>` in `cwd` in a new terminal. With `promptFile`, the
+// file's contents are passed as the opening prompt (read by the shell, so they
+// never pass through quoting). macOS uses Terminal.app; elsewhere the program
+// named by BANDWIDTH_LAUNCHER is run, without a shell, as:
+//   <launcher> <cwd> <title> [--prompt-file <file>] -- <claude args...>
+// scripts/launch-wsl-terminal.sh is one for WSL + Windows Terminal.
+function openClaude({ cwd, title, args, promptFile }) {
+  const name = terminalTitle(title);
+  if (process.platform === 'darwin' && !process.env.BANDWIDTH_LAUNCHER) {
+    const prompt = promptFile ? ` "$(cat ${shellQuote(promptFile)})"` : '';
+    openInTerminalApp(`cd ${shellQuote(cwd)} && claude ${args.map(shellQuote).join(' ')}${prompt}`, name);
+    return;
+  }
+  const launcher = process.env.BANDWIDTH_LAUNCHER;
+  if (!launcher) throw new Error('Set BANDWIDTH_LAUNCHER to a terminal launcher script (see README)');
+  const child = spawn(launcher, [
+    cwd, name, ...(promptFile ? ['--prompt-file', promptFile] : []), '--', ...args
+  ], { detached: true, stdio: 'ignore', env: childEnv() });
+  child.on('error', err => console.error('launcher failed:', err.message));
+  child.unref();
+}
+
+// Opens a new terminal resuming the session in its original directory
 export async function resumeSession(sessionId) {
   if (!SESSION_ID_RE.test(sessionId)) throw new Error('Invalid session id');
   const session = (await listSessions()).find(s => s.id === sessionId);
   if (!session) throw new Error('Session not found');
   if (!existsSync(session.cwd)) throw new Error(`Directory no longer exists: ${session.cwd}`);
-  openInTerminal(session.resumeCommand, session.title);
+  openClaude({ cwd: session.cwd, title: session.title, args: ['--resume', session.id] });
+}
+
+// Folders whose subfolders are Claude projects (CLAUDE_PROJECT_DIRS, colon
+// separated). Sessions started anywhere inside a project are grouped under it,
+// so work that isn't in a git worktree shows up too.
+export function projectBases() {
+  return (process.env.CLAUDE_PROJECT_DIRS || '').split(':').filter(Boolean)
+    .map(d => resolve(d.replace(/^~/, homedir())));
+}
+
+export async function listClaudeProjects() {
+  const bases = projectBases();
+  if (bases.length === 0) return [];
+  const days = Number(process.env.CLAUDE_PROJECT_DAYS) || 14;
+  const since = Date.now() - days * 24 * 60 * 60 * 1000;
+  const [sessions, running] = await Promise.all([
+    listSessions().catch(() => []),
+    runningClaudeCwds().catch(() => [])
+  ]);
+  const projectOf = p => {
+    for (const base of bases) {
+      if (p.startsWith(base + '/')) return join(base, p.slice(base.length + 1).split('/')[0]);
+    }
+    return null;
+  };
+  const byPath = new Map();
+  for (const s of sessions) {
+    const path = projectOf(s.cwd);
+    if (!path) continue;
+    if (!byPath.has(path)) byPath.set(path, []);
+    byPath.get(path).push(s);
+  }
+  const runningPaths = new Set(running.map(projectOf).filter(Boolean));
+  return [...byPath].map(([path, list]) => {
+    list.sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt));
+    const isRunning = runningPaths.has(path);
+    if (isRunning) list[0] = { ...list[0], running: true };
+    return {
+      name: basename(path),
+      path,
+      claudeSessions: list,
+      claudeRunning: isRunning,
+      lastSessionAt: list[0].lastActiveAt
+    };
+  })
+    .filter(p => p.claudeRunning || Date.parse(p.lastSessionAt) >= since)
+    .sort((a, b) => (b.claudeRunning - a.claudeRunning) || b.lastSessionAt.localeCompare(a.lastSessionAt));
 }
 
 function validateItem(item) {
@@ -211,11 +302,7 @@ export async function assignToClaude(item, worktreePath) {
   const briefPath = join(BRIEFS_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}-${slug}.md`);
   await writeFile(briefPath, brief);
 
-  // The brief is read via $(cat …) so its contents never pass through quoting
   const name = sessionName(item);
-  openInTerminal(
-    `cd ${shellQuote(worktree.path)} && claude -n ${shellQuote(name)} "$(cat ${shellQuote(briefPath)})"`,
-    name
-  );
+  openClaude({ cwd: worktree.path, title: name, args: ['-n', name], promptFile: briefPath });
   return { briefPath };
 }

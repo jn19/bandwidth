@@ -1,6 +1,6 @@
 // Case-insensitive partial match. Every whitespace-separated term must appear
 // somewhere in the item's text: title, key, repo#number, branch, worktree path,
-// note, or Claude session titles.
+// note, related note titles, or Claude session titles.
 
 export function parseQuery(query) {
   return query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -19,6 +19,7 @@ function haystack(item, worktree, annotation) {
     worktree?.path,
     worktree?.branch,
     annotation?.note,
+    ...(item.notes ?? []).map(n => n.title),
     ...(worktree?.claudeSessions ?? []).map(s => s.title)
   ].filter(Boolean).join('\n').toLowerCase();
 }

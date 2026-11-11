@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { listWorktrees, listAllWorktrees, createWorktree, removeWorktree, openInCode } from '../services/git.js';
-import { attachClaudeSessions } from '../services/claude.js';
+import { attachClaudeSessions, listClaudeProjects } from '../services/claude.js';
+import { notePaths } from '../services/notes.js';
 
 const router = Router();
 
@@ -39,7 +40,9 @@ router.post('/open', async (req, res) => {
     return res.status(400).json({ error: 'path is required' });
   }
   try {
-    openInCode(path);
+    // Besides worktrees, Claude project folders and indexed notes may be opened
+    const projects = (await listClaudeProjects()).map(p => p.path);
+    await openInCode(path, { allowed: [...projects, ...(await notePaths())] });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

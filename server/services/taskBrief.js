@@ -1,4 +1,7 @@
+import { readFile } from 'fs/promises';
+import { homedir } from 'os';
 import { getJiraIssueDetail } from './jira.js';
+import { notesByTicket } from './notes.js';
 
 // The opening prompt for a Claude session assigned to a work item. Jira details
 // are fetched here with the server's credentials; for GitHub, Claude runs `gh`
@@ -12,7 +15,14 @@ const WORKING_AGREEMENT = `## How to work
 5. Don't push, open or update a PR, post GitHub comments, or change the Jira issue without asking me first.
 6. Finish with a short summary: what you changed, how you verified it, and anything still open.`;
 
-function jiraBrief(issue, worktree) {
+// Notes (NOTES_DIR) whose frontmatter lists this issue, so Claude can read them first
+function relatedNotes(notes) {
+  if (!notes?.length) return '';
+  return `\n\n### Related notes\n\nRead these before starting; they hold earlier findings on this issue.\n\n${
+    notes.map(n => `- \`${n.path}\`${n.summary ? `: ${n.summary}` : ''}`).join('\n')}`;
+}
+
+function jiraBrief(issue, worktree, notes) {
   const meta = [
     issue.type && `Type: ${issue.type}`,
     issue.status && `Status: ${issue.status}`,
@@ -37,7 +47,7 @@ ${meta}
 
 ### Description
 
-${issue.description || '_No description provided._'}${comments}
+${issue.description || '_No description provided._'}${comments}${relatedNotes(notes)}
 
 ${WORKING_AGREEMENT.replace("when it's in a good state.", `when it's in a good state, with a message that references ${issue.key}.`)}`;
 }
@@ -85,10 +95,10 @@ Help me review it:
 Don't modify code, and don't post a review or comments on GitHub. I'll decide what to send.`;
 }
 
-export async function buildTaskBrief(item, worktree) {
+function buildBrief(item, worktree, notes) {
   switch (item.source) {
     case 'jira':
-      return jiraBrief(await getJiraIssueDetail(item.key), worktree);
+      return getJiraIssueDetail(item.key).then(issue => jiraBrief(issue, worktree, notes));
     case 'github-issue':
       return githubIssueBrief(item, worktree);
     case 'github-pr':
@@ -96,6 +106,20 @@ export async function buildTaskBrief(item, worktree) {
     default:
       throw new Error(`Can't assign a ${item.source} item to Claude`);
   }
+}
+
+// BRIEF_APPENDIX_FILE: optional markdown added to the end of every brief, for
+// your own conventions (which commands to use, where findings go, ...)
+async function appendix() {
+  const file = process.env.BRIEF_APPENDIX_FILE;
+  if (!file) return '';
+  const text = (await readFile(file.replace(/^~/, homedir()), 'utf8')).trim();
+  return text ? `\n\n${text}\n` : '';
+}
+
+export async function buildTaskBrief(item, worktree) {
+  const notes = item.source === 'jira' ? (await notesByTicket().catch(() => ({})))[item.key] : null;
+  return (await buildBrief(item, worktree, notes)) + await appendix();
 }
 
 export function sessionName(item) {
