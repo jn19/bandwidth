@@ -66,6 +66,9 @@ For **Resume** and **Assign to Claude**, set `BANDWIDTH_LAUNCHER` to a program t
 | `CLAUDE_PROJECT_DIRS` | Optional, colon-separated. Folders whose subfolders are Claude Code projects; their sessions are listed under **Claude projects**, even outside git worktrees |
 | `CLAUDE_PROJECT_DAYS` | How far back **Claude projects** looks (default: `14`) |
 | `NOTES_DIR` | Optional. A folder of markdown notes (e.g. an Obsidian vault). A note whose frontmatter has `tickets: [KEY-1]` is shown on that Jira card and listed in its Claude brief |
+| `NOTES_PROJECTS_SUBDIR` | Optional. With it, a note under `NOTES_DIR/<subdir>/<project>/` belongs to that project folder, which drives the project guess (e.g. `Projects` for an Obsidian vault laid out by project) |
+| `PROJECT_GUESS_EXCLUDE` | Optional, comma-separated. Projects never guessed, e.g. a weekly-roundup project whose notes mention every issue |
+| `CLAUDE_INCLUDE_HEADLESS` | `true` also lists `claude -p` / SDK runs under Claude projects (hidden by default) |
 | `BRIEF_APPENDIX_FILE` | Optional. Markdown added to the end of every "Assign to Claude" brief, for your own conventions |
 | `BANDWIDTH_LAUNCHER` | Terminal launcher for Resume / Assign on Linux and WSL (see below) |
 | `HOST` | Interface to listen on (default: `127.0.0.1`) |
@@ -100,6 +103,8 @@ Jira items also get a worktree button. If a local branch already mentions the is
 **New Jira issue**: pick a board, an issue type and a summary (plus an optional description), and tick **Assign to me** to have it land on your dashboard right away. Boards for the projects in `JIRA_PROJECT_KEYS` are listed first, and your last board is remembered. On a scrum board, the new issue goes to the backlog.
 
 **Claude projects**: with `CLAUDE_PROJECT_DIRS` set, a section lists recent Claude Code sessions grouped by project folder, with the same Resume and Copy command buttons. Projects where Claude is running come first.
+
+**Project folders for Jira issues**: with `CLAUDE_PROJECT_DIRS` set, every Jira card has a **Project** picker, so work that lives in a plain folder (not a git repo) still gets a home. It defaults to your earlier choice for that issue, else a guess: the project with the most notes (`NOTES_PROJECTS_SUBDIR`) and Claude Code memory files (`~/.claude/projects/<folder>/memory/`) naming the issue. **Assign to Claude** then opens Claude in that folder with the issue loaded, no worktree needed (and the brief says not to commit unless asked). Worktree buttons appear only when the issue is code: a local branch names it, or its project is a git repo.
 
 **Related notes**: with `NOTES_DIR` set, Jira cards list the markdown notes whose frontmatter names the issue (`tickets: [KEY-1]`), and "Assign to Claude" tells Claude to read them first.
 
