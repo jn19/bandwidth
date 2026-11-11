@@ -50,6 +50,19 @@ test('clearing on one machine is not undone by an older copy on another', async 
   assert.equal((await getState()).annotations['jira-C-1'].pinned, true);
 });
 
+test('an edit beats the version it replaced, even when this clock runs behind', async () => {
+  // beta's clock is 10 minutes ahead of ours
+  const ahead = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  await write('beta', { annotations: { 'jira-G-1': { pinned: true, changedAt: ahead } } });
+  await annotate('jira-G-1', { pinned: false, note: 'done with it' });
+  assert.deepEqual((await getState()).annotations['jira-G-1'].note, 'done with it');
+  assert.equal((await getState()).annotations['jira-G-1'].pinned, undefined);
+  // a clear works the same way
+  await write('beta', { annotations: { 'jira-G-2': { pinned: true, changedAt: ahead } } });
+  await annotate('jira-G-2', { pinned: false });
+  assert.equal((await getState()).annotations['jira-G-2'], undefined);
+});
+
 test('a commitment added on one machine and finished on another is gone everywhere', async () => {
   const c = await addCommitment({ title: 'Send the report', dueDate: '2030-01-02' });
   await annotate(c.id, { note: 'draft is in Drive' });

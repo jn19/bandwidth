@@ -126,7 +126,7 @@ Both resume and assign open a Terminal tab whose custom title is the session or 
 
 Writes are serialized through a promise queue and written atomically (tmp file + rename). A corrupt file errors instead of being reset.
 
-With `STATE_DIR`, each machine writes only `state-<STATE_MACHINE or hostname>.json` there (one writer per file, so a sync tool never has to pick a winner), and reads merge every `state-*.json`. Records carry `changedAt`; per id the newest wins (ties: later machine name). Clearing an annotation or removing a commitment writes `{ deleted: true }`. Another machine's unreadable file is skipped with a warning; this machine's own throws. The API strips `changedAt` / `deleted`. Old-format files (commitments as a list) still read.
+With `STATE_DIR`, each machine writes only `state-<STATE_MACHINE or hostname>.json` there (one writer per file, so a sync tool never has to pick a winner), and reads merge every `state-*.json`. Records carry `changedAt`; per id the newest wins (ties: later machine name). A write is stamped at least 1 ms after the merged record it replaced, so an edit beats what it saw even when this machine's clock runs behind; only edits that hadn't seen each other are decided by the clocks. Clearing an annotation or removing a commitment writes `{ deleted: true }`. Another machine's unreadable file is skipped with a warning; this machine's own throws. The API strips `changedAt` / `deleted`. Old-format files (commitments as a list) still read.
 
 ## Environment
 

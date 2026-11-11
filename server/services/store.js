@@ -128,9 +128,20 @@ function mutate(fn) {
     const file = ownFile();
     const [merged, own] = await Promise.all([loadMerged(), readState(file)]);
     const { annotations = {}, commitments = {}, result } = fn(merged);
-    const changedAt = new Date().toISOString();
-    for (const [id, rec] of Object.entries(annotations)) own.annotations[id] = { ...rec, changedAt };
-    for (const [id, rec] of Object.entries(commitments)) own.commitments[id] = { ...rec, changedAt };
+    // A change is stamped after the version it replaced, even when this machine's clock
+    // runs behind (WSL after sleep), so an edit you made always beats what you saw;
+    // clocks only decide between edits that hadn't seen each other
+    const stamp = seen => {
+      const now = Date.now();
+      const after = seen ? Date.parse(seen) + 1 : 0;
+      return new Date(Number.isNaN(after) ? now : Math.max(now, after)).toISOString();
+    };
+    for (const [id, rec] of Object.entries(annotations)) {
+      own.annotations[id] = { ...rec, changedAt: stamp(merged.annotations[id]?.changedAt) };
+    }
+    for (const [id, rec] of Object.entries(commitments)) {
+      own.commitments[id] = { ...rec, changedAt: stamp(merged.commitments[id]?.changedAt) };
+    }
     await mkdir(dirname(file), { recursive: true });
     const tmp = `${file}.tmp`;
     await writeFile(tmp, JSON.stringify({ version: 2, ...own }, null, 2));
