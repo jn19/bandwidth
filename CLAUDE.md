@@ -16,7 +16,7 @@ npm run dev:server   # Express on :3001
 npm run dev:client   # Vite on :5173
 ```
 
-There are no tests or lint scripts configured.
+`npm test` runs the client unit tests (`client/src/*.test.js`, Node's built-in runner). There is no lint script.
 
 ## Architecture
 
@@ -30,10 +30,10 @@ The server binds `127.0.0.1` (`HOST`). `localOnly` middleware runs before every 
 
 1. On load, the client fetches `/api/config` and `/api/repos` in parallel, then `/api/github/items`, `/api/jira/items` and `/api/state`.
 2. It then fetches `/api/worktrees` (a single call that lists worktrees across every repo under `LOCAL_REPO_BASE`) to hydrate worktree status.
-3. `buildInFlight()` (`client/src/inFlight.js`) pulls already-started work out of the categories into an **In flight** lane at the top: pinned items, commitments, your open PRs, Jira issues whose status category is "In Progress", any item with a worktree, and ad-hoc worktrees with uncommitted changes. Snoozed items (from anywhere) go to a collapsed "Snoozed" section until their snooze ends. Entries carry signals (due date, PR state, CI, conflicts, uncommitted files, last activity) and are sorted pinned-first, then actionable, then most neglected. Pinned items and commitments never go dormant. Entries idle more than 7 days are flagged as stalled; entries idle more than 90 days are collapsed under "dormant".
-4. The remaining items are sorted by `byUrgency()` (`client/src/urgency.js`: review requests first, then Jira priority, then oldest first) and grouped into category columns. Nothing is filtered out.
-5. Worktrees on disk with no uncommitted changes, no running Claude session, and no matching item are shown in a "Stale worktrees" section under the categories grid.
-6. The header search box (`/` to focus) filters every section with `matches()` (`client/src/search.js`): case-insensitive, each whitespace-separated term must appear in the item's title, key, repo, `#number`, branch, worktree path, note or Claude session titles. It only filters what's shown; dormant and snoozed sections open while searching.
+3. `buildPriorities()` (`client/src/priority.js`) puts every item, commitment, live ad-hoc worktree and waiting Claude session into one action group, first match wins: `respond` (feed reply, review requested, changes requested / CI failing, Claude waiting), `unsent` (`evidenceReady`; label from `EVIDENCE_READY_LABEL`), `gather` (`evidenceAsk`, not waiting), `due` (due within 7 days or past), `follow` (`waitingOnOthers`, idle over `FOLLOW_UP_DAYS`; under that it's `waiting`), `progress` (started or pinned), else `later`. Started work idle 90+ days (not pinned, not a commitment) is `later` with `dormant`. Each entry gets a `score` (group base + due + Jira priority + pinned + idle; see README), `reasons`, `category` (`categorize()` against `CATEGORY_RULES_FILE` rules, or the `category` annotation) and `estimate` (minutes for Easy Wins, or the `estimate` annotation; `'none'` drops it). Snoozed items go to a collapsed "Snoozed" section. `primaryAction()` picks each row's one button.
+4. `App.jsx` shows Do next (top 3 actionable), the six groups (5 rows + "+N more"), Easy Wins (`easyExtras()` adds big running sessions and feed asks), then collapsed Waiting on others and Later. The category chip (URL hash) and search narrow all of it; the header stats don't. Focus (`localStorage`) hides everything but Do next. Rows are `ActionRow` (details reuse `WorkItem` with `variant="details"`); handlers come through `ActionsContext`.
+5. Worktrees on disk with no uncommitted changes, no running Claude session, and no matching item are shown in a "Stale worktrees" section at the bottom.
+6. The header search box (`/` to focus) filters every section with `matches()` (`client/src/search.js`): case-insensitive, each whitespace-separated term must appear in the item's title, key, repo, `#number`, branch, worktree path, note or Claude session titles. It only filters what's shown; collapsed sections open while searching.
 
 ### Work item shape
 
@@ -41,13 +41,12 @@ The server binds `127.0.0.1` (`HOST`). `localOnly` middleware runs before every 
 {
   id, title, description, url,
   source: 'github-pr' | 'github-issue' | 'jira',
-  category: 'code-review' | 'bug' | 'task' | 'docs' | <spotlightProject.toLowerCase()>,
-  effort: 'small' | 'medium' | 'large',  // shown as a badge only
+  effort: 'small' | 'medium' | 'large',  // shown in details; small + not started = Easy Win
   repo,        // "owner/repo-name" (GitHub) or just "repo-name" (Jira auto-match)
   repoName,    // just "repo-name" — used for worktree API calls
   branch,      // PR head ref (GitHub PR) or matched local branch (Jira); null otherwise
   subtitle,    // "Review requested" / "Changes requested" / Jira status name
-  createdAt,   // used as "waiting since" for urgency sorting
+  createdAt,   // shown as "waiting" on review requests
   updatedAt,
 
   // Jira-only fields:
@@ -55,6 +54,10 @@ The server binds `127.0.0.1` (`HOST`). `localOnly` middleware runs before every 
   branchMatches,   // [{ repoName, branch }] — every local branch whose name contains the Jira key
   projectKey,      // e.g. "SOC" — used by the client to remember repo picks per-project
   inProgress,      // status category is "In Progress"
+  notStarted,      // status category is "To Do"
+  evidenceReady,   // status in JIRA_EVIDENCE_READY_STATUSES
+  evidenceAsk,     // full description matches EVIDENCE_ASK_PATTERN
+  dueDate,         // Jira duedate, "YYYY-MM-DD" or null
   priority,        // Jira priority name, e.g. "High"
 
   // GitHub PR-only fields:
@@ -71,7 +74,7 @@ The server binds `127.0.0.1` (`HOST`). `localOnly` middleware runs before every 
 
 ### Jira integration
 
-`server/services/jira.js` calls the Jira REST API v3 directly with Basic auth. `JIRA_SPOTLIGHT_PROJECT` (e.g. `SOC`) causes issues from that project to bypass bug/docs type detection and land in their own category column. The category ID is `spotlightProject.toLowerCase()`. The frontend fetches this value from `/api/config` on mount and appends the column dynamically.
+`server/services/jira.js` calls the Jira REST API v3 directly with Basic auth. Work areas are not Jira fields: `server/services/categories.js` loads and checks `CATEGORY_RULES_FILE` (cached by mtime) and `/api/config` returns its `categories` and `quickWins` (regex sources; the client compiles and applies them), plus `evidenceReadyLabel`, `followUpDays` and `rulesError`.
 
 Creating issues (the "New Jira issue" form, `client/src/components/NewJiraIssue.jsx`):
 - `GET /api/jira/boards`: every board with a project location (agile API), configured projects first. The board only picks the project; the issue lands on that project's boards.
@@ -101,7 +104,7 @@ Other helpers in this module:
 
 `GET /api/claude/projects/all` lists every project folder (`server/services/projects.js`: `{ name, path, isRepo }`). `POST /api/claude/assign` also takes `{ item, projectPath }` (Jira only; path must be one of those folders); the brief's location is `{ kind: 'worktree' | 'project', path, branch?, isRepo? }`. `/api/notes/tickets` returns `{ [key]: { notes, project } }`, where `project` is the guess from notes (`NOTES_PROJECTS_SUBDIR`) plus Claude memory files, minus `PROJECT_GUESS_EXCLUDE`; the client keeps it as `item.projectGuess`, and the user's choice is the quiet annotation field `project` (doesn't bump `updatedAt`). Headless (`entrypoint: sdk-*`) sessions are hidden unless `CLAUDE_INCLUDE_HEADLESS=true`.
 
-Also: `GET /api/feed` runs `FEED_COMMAND` (`server/services/feed.js`: no shell, 20 s timeout, items sanitized, http(s) URLs only, 60 s cache; `?fresh=1` skips it). `GET /api/journal` reads `JOURNAL_FILE` bullets for today and the last earlier day (`server/services/journal.js`). `POST /api/claude/new { projectPath }` starts a fresh session (launcher `--prefill` from `NEW_SESSION_PREFILL`). Sessions carry `contextTokens` (last assistant turn's input + cache tokens), and with `SESSION_STATE_DIR` `state`/`running` from live hook files (dead tmux panes ignored) plus `focusUrl` from `FOCUS_URL_TEMPLATE`. Projects carry `personal` / `badge` from `PERSONAL_PROJECTS_FILE` / `BADGE_PROJECTS_FILE`. Jira items carry `waitingOnOthers` (`JIRA_WAITING_STATUSES`); `/api/notes/tickets` adds `localActivityAt` (notes' file times, memory files, sessions naming the key). Client: `buildInFlight` returns `waiting`; feed items with a matching `key` become `item.feedSignals` (alert tone, so actionable), the rest render in `AskedOfYou` and can be snoozed via annotations.
+Also: `GET /api/feed` runs `FEED_COMMAND` (`server/services/feed.js`: no shell, 20 s timeout, items sanitized, http(s) URLs only, 60 s cache; `?fresh=1` skips it). `GET /api/journal` reads `JOURNAL_FILE` bullets for today and the last earlier day (`server/services/journal.js`). `POST /api/claude/new { projectPath }` starts a fresh session (launcher `--prefill` from `NEW_SESSION_PREFILL`). Sessions carry `contextTokens` (last assistant turn's input + cache tokens), and with `SESSION_STATE_DIR` `state`/`running` from live hook files (dead tmux panes ignored) plus `focusUrl` from `FOCUS_URL_TEMPLATE`. Projects carry `personal` / `badge` from `PERSONAL_PROJECTS_FILE` / `BADGE_PROJECTS_FILE`. Jira items carry `waitingOnOthers` (`JIRA_WAITING_STATUSES`); `/api/notes/tickets` adds `localActivityAt` (notes' file times, memory files, sessions naming the key). Client: `buildPriorities` puts them in `waiting` / `follow`; feed items with a matching `key` become `item.feedSignals` (alert tone, so actionable), the rest render in `AskedOfYou` and can be snoozed via annotations.
 
 `GET /api/claude/projects` groups sessions by project folder under `CLAUDE_PROJECT_DIRS` (last `CLAUDE_PROJECT_DAYS` days, running first). `GET /api/notes/tickets` (`server/services/notes.js`) indexes `NOTES_DIR` markdown frontmatter `tickets: [KEY-1]` lines, cached by mtime; the client attaches the notes to Jira items as `item.notes`.
 
@@ -118,7 +121,7 @@ Both resume and assign open a Terminal tab whose custom title is the session or 
 ### Personal state
 
 `server/services/store.js` keeps what GitHub/Jira don't know in `server/data/state.json` (gitignored), served under `/api/state`:
-- `annotations: { [itemId]: { note, pinned, snoozedUntil, updatedAt } }`: any item can be annotated, including commitments and ad-hoc worktrees (`worktree-{repo}/{branch}`). `PUT /api/state/annotations` takes `{ id, ...patch }` (id goes in the body because it can contain slashes). `null` / `''` / `false` clear a field, and an annotation with no fields left is deleted. An annotation edit counts as activity for staleness.
+- `annotations: { [itemId]: { note, pinned, snoozedUntil, project, category, estimate, updatedAt } }`: any item can be annotated, including commitments and ad-hoc worktrees (`worktree-{repo}/{branch}`). `PUT /api/state/annotations` takes `{ id, ...patch }` (id goes in the body because it can contain slashes). `null` / `''` / `false` clear a field, and an annotation with no fields left is deleted. An annotation edit counts as activity for staleness, except the quiet fields `project`, `category` and `estimate` (category must be an id, estimate 2/5/15/30/`'none'`; anything else is a 400).
 - `commitments: [{ id, title, dueDate, createdAt }]`: free-text promises with an optional local `YYYY-MM-DD` due date. `POST /api/state/commitments` adds one; `DELETE /api/state/commitments/:id` marks it done (removes it and its annotation).
 
 Writes are serialized through a promise queue and written atomically (tmp file + rename). A corrupt file errors instead of being reset.
@@ -132,7 +135,9 @@ Copy `.env.example` to `.env` at the repo root. The server loads it from `../  .
 | `JIRA_HOST` | e.g. `yourco.atlassian.net` |
 | `JIRA_EMAIL` / `JIRA_API_TOKEN` | Basic auth for Jira REST API |
 | `JIRA_PROJECT_KEYS` | Comma-separated keys to filter JQL results |
-| `JIRA_SPOTLIGHT_PROJECT` | Project key that gets its own category column |
+| `JIRA_WAITING_STATUSES` / `FOLLOW_UP_DAYS` | Next move is someone else's; days idle before Follow up (default 5) |
+| `JIRA_EVIDENCE_READY_STATUSES` / `EVIDENCE_READY_LABEL` / `EVIDENCE_ASK_PATTERN` | Evidence gathered-not-sent statuses and group name; regex for "evidence asked for" |
+| `CATEGORY_RULES_FILE` | JSON work-area rules (filter chips) and quick-win rules; format in README |
 | `LOCAL_REPO_BASE` | Parent dir of local repos; defaults to `~/development` |
 | `GITHUB_INCLUDE_ISSUES` | Set to `false` to skip the assigned-issues fetch; PRs only. Defaults to `true` |
 | `JIRA_API_BASE` / `JIRA_READ_ONLY` | Gateway base URL for scoped tokens; `true` refuses Jira writes and hides the create form |

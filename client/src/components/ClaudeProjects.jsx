@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import ClaudeSessions from './ClaudeSessions.jsx';
-import { ageLabel } from '../inFlight.js';
+import { ageLabel } from '../signals.js';
 
 const COLLAPSED_COUNT = 6;
 

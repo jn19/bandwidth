@@ -1,4 +1,4 @@
-import { ageLabel } from '../inFlight.js';
+import { ageLabel } from '../signals.js';
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
 

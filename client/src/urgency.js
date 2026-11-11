@@ -18,10 +18,3 @@ export function waitingSince(item) {
   const t = Date.parse(item.createdAt);
   return Number.isNaN(t) ? null : t;
 }
-
-// Review requests first (someone is blocked on you), then by priority, then oldest first
-export function byUrgency(a, b) {
-  return ((b.role === 'reviewer') - (a.role === 'reviewer')) ||
-    (priorityRank(a) - priorityRank(b)) ||
-    ((waitingSince(a) ?? Infinity) - (waitingSince(b) ?? Infinity));
-}

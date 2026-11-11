@@ -22,12 +22,6 @@ function repoFromUrl(repositoryUrl) {
   return match ? { owner: match[1], repo: match[2] } : null;
 }
 
-function inferCategoryFromLabels(labels) {
-  if (labels.some(l => l.includes('bug') || l.includes('fix'))) return 'bug';
-  if (labels.some(l => l.includes('doc'))) return 'docs';
-  return 'task';
-}
-
 function summarizeChecks(checkRuns) {
   if (!checkRuns?.length) return null;
   const failed = ['failure', 'timed_out', 'cancelled', 'action_required'];
@@ -109,7 +103,6 @@ export async function getGitHubItems() {
       description: (pr.body || '').slice(0, 200),
       url: pr.html_url,
       source: 'github-pr',
-      category: 'code-review',
       effort: changes < 100 ? 'small' : changes < 500 ? 'medium' : 'large',
       repo: `${owner}/${repo}`,
       repoName: repo,
@@ -129,14 +122,12 @@ export async function getGitHubItems() {
   for (const issue of assignedIssues) {
     const r = repoFromUrl(issue.repository_url);
     if (!r) continue;
-    const labels = issue.labels.map(l => l.name.toLowerCase());
     items.push({
       id: `github-issue-${r.owner}-${r.repo}-${issue.number}`,
       title: issue.title,
       description: (issue.body || '').slice(0, 200),
       url: issue.html_url,
       source: 'github-issue',
-      category: inferCategoryFromLabels(labels),
       effort: 'medium',
       repo: `${r.owner}/${r.repo}`,
       repoName: r.repo,

@@ -13,6 +13,7 @@ import notesRoutes from './routes/notes.js';
 import { localOnly } from './security.js';
 import { getFeed } from './services/feed.js';
 import { getJournal } from './services/journal.js';
+import { getCategoryRules } from './services/categories.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, '../.env') });
@@ -26,11 +27,23 @@ app.use(localOnly);
 app.use(express.json());
 
 app.get('/api/health', (_, res) => res.json({ ok: true }));
-app.get('/api/config', (_, res) => res.json({
-  spotlightProject: process.env.JIRA_SPOTLIGHT_PROJECT || null,
-  jiraReadOnly: process.env.JIRA_READ_ONLY === 'true',
-  contextWarnTokens: Number(process.env.CONTEXT_WARN_TOKENS) || 400000
-}));
+app.get('/api/config', async (_, res) => {
+  let rules = { categories: [], quickWins: [] };
+  let rulesError = null;
+  try {
+    rules = await getCategoryRules();
+  } catch (err) {
+    rulesError = err.message;
+  }
+  res.json({
+    jiraReadOnly: process.env.JIRA_READ_ONLY === 'true',
+    contextWarnTokens: Number(process.env.CONTEXT_WARN_TOKENS) || 400000,
+    evidenceReadyLabel: process.env.EVIDENCE_READY_LABEL || 'Evidence ready',
+    followUpDays: Number(process.env.FOLLOW_UP_DAYS) || 5,
+    ...rules,
+    rulesError
+  });
+});
 app.get('/api/feed', async (req, res) => {
   try {
     res.json(await getFeed({ fresh: req.query.fresh === '1' }));

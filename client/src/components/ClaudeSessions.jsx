@@ -1,5 +1,5 @@
 import { useState, useContext } from 'react';
-import { ageLabel } from '../inFlight.js';
+import { ageLabel } from '../signals.js';
 import { ProjectsContext } from '../projectsContext.js';
 
 const STATE_LABELS = {

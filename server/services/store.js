@@ -8,9 +8,16 @@ import { randomUUID } from 'crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = resolve(__dirname, '../data/state.json');
 
-const ANNOTATION_FIELDS = ['note', 'pinned', 'snoozedUntil', 'project'];
+const ANNOTATION_FIELDS = ['note', 'pinned', 'snoozedUntil', 'project', 'category', 'estimate'];
 // Remembered settings, not work: changing them doesn't count as activity
-const QUIET_FIELDS = new Set(['project']);
+const QUIET_FIELDS = new Set(['project', 'category', 'estimate']);
+// category: a CATEGORY_RULES_FILE id; estimate: minutes, or 'none' for "not a quick one"
+const VALID = {
+  category: v => typeof v === 'string' && /^[a-z0-9-]{1,40}$/.test(v),
+  estimate: v => [2, 5, 15, 30, 'none'].includes(v)
+};
+
+export class InvalidAnnotation extends Error {}
 
 function emptyState() {
   return { annotations: {}, commitments: [] };
@@ -49,6 +56,12 @@ export function getState() {
 // Merges `patch` into the item's annotation. null / '' / false clear a field;
 // an annotation with no fields left is deleted. Returns the annotation or null.
 export function annotate(id, patch) {
+  for (const [field, valid] of Object.entries(VALID)) {
+    const value = patch[field];
+    if (value !== undefined && value !== null && value !== '' && !valid(value)) {
+      return Promise.reject(new InvalidAnnotation(`Invalid ${field}`));
+    }
+  }
   return mutate(state => {
     const next = { ...state.annotations[id] };
     for (const field of ANNOTATION_FIELDS) {

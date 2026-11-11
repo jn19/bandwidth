@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getState, annotate, addCommitment, removeCommitment } from '../services/store.js';
+import { getState, annotate, addCommitment, removeCommitment, InvalidAnnotation } from '../services/store.js';
 
 const router = Router();
 
@@ -20,7 +20,7 @@ router.put('/annotations', async (req, res) => {
   try {
     res.json({ annotation: await annotate(id, patch) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(err instanceof InvalidAnnotation ? 400 : 500).json({ error: err.message });
   }
 });
 

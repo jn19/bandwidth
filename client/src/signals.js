@@ -23,20 +23,25 @@ export function isSnoozed(annotation, now = Date.now()) {
   return !Number.isNaN(until) && until > now;
 }
 
-// dueDate is a local calendar date ("YYYY-MM-DD") from a date input
-function dueSignal(dueDate, now) {
+// Whole days from today to a local calendar date ("YYYY-MM-DD"); negative when past
+export function daysUntil(dueDate, now = Date.now()) {
   const due = new Date(`${dueDate}T00:00`);
   if (Number.isNaN(due.getTime())) return null;
   const today = new Date(now);
   today.setHours(0, 0, 0, 0);
-  const days = Math.round((due - today) / DAY);
+  return Math.round((due - today) / DAY);
+}
+
+function dueSignal(dueDate, now) {
+  const days = daysUntil(dueDate, now);
+  if (days === null) return null;
   if (days < 0) return { label: `Overdue by ${-days}d`, tone: 'alert' };
   if (days === 0) return { label: 'Due today', tone: 'warn' };
   if (days === 1) return { label: 'Due tomorrow', tone: 'warn' };
   return { label: `Due in ${days}d`, tone: 'muted' };
 }
 
-function commitmentItem(c) {
+export function commitmentItem(c) {
   return {
     id: c.id,
     title: c.title,
@@ -52,7 +57,9 @@ function latestTimestamp(...isoStrings) {
   return times.length ? Math.max(...times) : null;
 }
 
-function describe(item, worktree, annotation, now) {
+// Signals (due date, PR state, CI, uncommitted files, last activity) and idle time
+// for one item, used for its details and for priority
+export function describe(item, worktree, annotation, now = Date.now()) {
   const signals = [];
 
   const due = item.dueDate && dueSignal(item.dueDate, now);
@@ -90,73 +97,4 @@ function describe(item, worktree, annotation, now) {
   const dormant = !pinned && item.source !== 'commitment' &&
     idleMs !== null && idleMs > DORMANT_AFTER_DAYS * DAY;
   return { item, worktree, annotation, signals, needsAction, pinned, stale, dormant, idleMs };
-}
-
-// Work you've already started or committed to: pinned items, your commitments,
-// your open PRs, Jira issues in an in-progress status, anything with a worktree,
-// and ad-hoc worktrees with uncommitted changes or a running Claude session.
-// Snoozed items are set aside. Jira issues in a JIRA_WAITING_STATUSES status go
-// to `waiting` (the next move is someone else's) unless pinned or replied to.
-export function buildInFlight(items, worktrees, { annotations = {}, commitments = [] } = {}, now = Date.now()) {
-  const entries = [];
-  const snoozed = [];
-  const waiting = [];
-  const itemIds = new Set();     // handled here (in flight or snoozed) — kept out of the categories
-  const worktreeKeys = new Set(); // claimed worktrees — kept out of "stale worktrees"
-
-  function consider(item, worktree, startedWork) {
-    const annotation = annotations[item.id];
-    if (isSnoozed(annotation, now)) {
-      itemIds.add(item.id);
-      snoozed.push({ item, worktree, annotation });
-    } else if (item.waitingOnOthers && !annotation?.pinned && !item.feedSignals?.length) {
-      itemIds.add(item.id);
-      waiting.push(describe(item, worktree, annotation, now));
-    } else if (startedWork || annotation?.pinned) {
-      itemIds.add(item.id);
-      entries.push(describe(item, worktree, annotation, now));
-    }
-  }
-
-  for (const c of commitments) consider(commitmentItem(c), null, true);
-
-  for (const item of items) {
-    const key = item.repoName && item.branch ? `${item.repoName}/${item.branch}` : null;
-    const worktree = key ? worktrees[key] : null;
-    if (worktree) worktreeKeys.add(key);
-    consider(item, worktree, item.role === 'author' || item.inProgress || !!worktree || !!item.feedSignals?.length);
-  }
-
-  for (const [key, wt] of Object.entries(worktrees)) {
-    if (worktreeKeys.has(key) || !(wt.dirtyCount || wt.claudeRunning)) continue;
-    worktreeKeys.add(key);
-    consider({
-      id: `worktree-${key}`,
-      title: wt.branch,
-      source: 'worktree',
-      repo: wt.repoName,
-      repoName: wt.repoName,
-      branch: wt.branch,
-      subtitle: 'Local work with no matching PR or ticket'
-    }, wt, true);
-  }
-
-  // Pinned first, then actionable, then the longest-neglected
-  entries.sort((a, b) =>
-    (b.pinned - a.pinned) ||
-    (b.needsAction - a.needsAction) ||
-    (b.stale - a.stale) ||
-    ((b.idleMs ?? 0) - (a.idleMs ?? 0))
-  );
-  // Soonest to wake up first
-  snoozed.sort((a, b) => Date.parse(a.annotation.snoozedUntil) - Date.parse(b.annotation.snoozedUntil));
-
-  return {
-    entries: entries.filter(e => !e.dormant),
-    dormant: entries.filter(e => e.dormant),
-    snoozed,
-    waiting: waiting.sort((a, b) => (b.idleMs ?? 0) - (a.idleMs ?? 0)),
-    itemIds,
-    worktreeKeys
-  };
 }

@@ -1,26 +1,27 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import './App.css';
-import WorkCategory from './components/WorkCategory.jsx';
 import NewWorktree from './components/NewWorktree.jsx';
 import NewJiraIssue from './components/NewJiraIssue.jsx';
-import InFlight from './components/InFlight.jsx';
 import Snoozed from './components/Snoozed.jsx';
 import ClaudeSessions from './components/ClaudeSessions.jsx';
 import ClaudeProjects from './components/ClaudeProjects.jsx';
-import WaitingOnOthers from './components/WaitingOnOthers.jsx';
 import AskedOfYou from './components/AskedOfYou.jsx';
 import TodayPanel from './components/TodayPanel.jsx';
-import { buildInFlight, isSnoozed } from './inFlight.js';
+import DoNext from './components/DoNext.jsx';
+import HeaderStats from './components/HeaderStats.jsx';
+import CategoryChips from './components/CategoryChips.jsx';
+import CommitmentForm from './components/CommitmentForm.jsx';
+import { ActionGroup, CollapsedGroup, EasyWins } from './components/ActionGroups.jsx';
+import { isSnoozed, DORMANT_AFTER_DAYS } from './signals.js';
+import { buildPriorities, easyExtras, GROUPS, GROUP_BY_ID } from './priority.js';
 import { ProjectsContext } from './projectsContext.js';
-import { byUrgency } from './urgency.js';
+import { ActionsContext } from './actionsContext.js';
 import { parseQuery, matches, worktreeMatches } from './search.js';
+import { loadPref, savePref } from './prefs.js';
 
-const BASE_CATEGORIES = [
-  { id: 'code-review', label: 'Code Review', color: '#3b82f6' },
-  { id: 'bug',         label: 'Bugs',        color: '#ef4444' },
-  { id: 'task',        label: 'Tasks',       color: '#10b981' },
-  { id: 'docs',        label: 'Docs',        color: '#8b5cf6' }
-];
+function hashCategory() {
+  return decodeURIComponent(window.location.hash.slice(1)) || null;
+}
 
 export default function App() {
   const [items, setItems] = useState([]);
@@ -28,8 +29,14 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [errors, setErrors] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [spotlightProject, setSpotlightProject] = useState(null);
   const [jiraReadOnly, setJiraReadOnly] = useState(false);
+  const [categories, setCategories] = useState([]);
+  const [quickWins, setQuickWins] = useState([]);
+  const [evidenceReadyLabel, setEvidenceReadyLabel] = useState('Evidence ready');
+  const [followUpDays, setFollowUpDays] = useState(5);
+  const [configError, setConfigError] = useState(null);
+  const [activeCat, setActiveCat] = useState(hashCategory);
+  const [focus, setFocus] = useState(() => loadPref('focus', false));
   const [claudeProjects, setClaudeProjects] = useState([]);
   const [allProjects, setAllProjects] = useState([]);
   const [contextWarnTokens, setContextWarnTokens] = useState(400000);
@@ -54,13 +61,34 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  // The category filter lives in the URL hash (#helpdesk), so a link or reload keeps it
+  useEffect(() => {
+    const onHash = () => setActiveCat(hashCategory());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  function pickCategory(id) {
+    setActiveCat(id);
+    const { pathname, search } = window.location;
+    window.history.replaceState(null, '', id ? `#${encodeURIComponent(id)}` : pathname + search);
+  }
+
+  function toggleFocus() {
+    setFocus(f => { savePref('focus', !f); return !f; });
+  }
+
   useEffect(() => {
     fetch('/api/config')
       .then(r => r.json())
       .then(c => {
-        setSpotlightProject(c.spotlightProject || null);
         setJiraReadOnly(!!c.jiraReadOnly);
         if (c.contextWarnTokens) setContextWarnTokens(c.contextWarnTokens);
+        if (c.evidenceReadyLabel) setEvidenceReadyLabel(c.evidenceReadyLabel);
+        if (c.followUpDays) setFollowUpDays(c.followUpDays);
+        setCategories(c.categories ?? []);
+        setQuickWins(c.quickWins ?? []);
+        if (c.rulesError) setConfigError('Categories: ' + c.rulesError);
       })
       .catch(() => {});
     fetch('/api/repos')
@@ -219,48 +247,58 @@ export default function App() {
     });
   }
 
-  const categories = spotlightProject
-    ? [...BASE_CATEGORIES, { id: spotlightProject.toLowerCase(), label: spotlightProject, color: '#f97316' }]
-    : BASE_CATEGORIES;
+  const prio = buildPriorities(items, worktrees, {
+    annotations, commitments, projects: claudeProjects, categories, quickWins, followUpDays
+  });
+  // Rules match in file order; chips and pickers follow `order`
+  const chipCategories = [...categories].sort((a, b) => a.order - b.order);
+  const cat = categories.some(c => c.id === activeCat) ? activeCat : null;
+  const groupLabel = g => (g.id === 'unsent' ? evidenceReadyLabel : g.label);
 
-  // In-flight work is pulled out of the categories into its own lane
-  const inFlight = buildInFlight(items, worktrees, { annotations, commitments });
-  const queuedItems = items.filter(i => !inFlight.itemIds.has(i.id)).sort(byUrgency);
-
-  // Search narrows every section but doesn't change what counts as in flight
+  // Search and the category filter narrow every section; the header stats stay whole
   const terms = parseQuery(query);
   const searching = terms.length > 0;
-  const entryMatches = e => matches(terms, e.item, e.worktree, e.annotation);
-  const visibleEntries = inFlight.entries.filter(entryMatches);
-  const visibleDormant = inFlight.dormant.filter(entryMatches);
-  const visibleSnoozed = inFlight.snoozed.filter(entryMatches);
-  const visibleQueued = queuedItems.filter(i => matches(
-    terms, i, i.branch ? worktrees[`${i.repoName}/${i.branch}`] : null, annotations[i.id]
-  ));
-  const grouped = categories.map(cat => ({
-    ...cat,
-    items: visibleQueued.filter(i => i.category === cat.id)
-  }));
+  const shown = prio.entries.filter(e =>
+    (!cat || e.category === cat) && matches(terms, e.item, e.worktree, e.annotation));
+  const inGroup = id => shown.filter(e => e.group === id);
+  const doNext = shown.filter(e => GROUP_BY_ID[e.group]).slice(0, 3);
+  const waitingEntries = inGroup('waiting').sort((a, b) => (b.idleMs ?? 0) - (a.idleMs ?? 0));
+  const laterEntries = inGroup('later');
+  const visibleSnoozed = prio.snoozed.filter(e => matches(terms, e.item, e.worktree, e.annotation));
+
+  const countOf = id => prio.entries.filter(e => e.group === id).length;
+  const categoryCounts = {};
+  const respondIn = new Set();
+  for (const e of prio.entries) {
+    if (!e.category) continue;
+    categoryCounts[e.category] = (categoryCounts[e.category] ?? 0) + 1;
+    if (e.group === 'respond') respondIn.add(e.category);
+  }
 
   // Orphan worktrees: on disk but no active item references them
   const activeKeys = new Set(
     items.filter(i => i.repoName && i.branch).map(i => `${i.repoName}/${i.branch}`)
   );
   const orphanWorktrees = Object.entries(worktrees)
-    .filter(([key]) => !activeKeys.has(key) && !inFlight.worktreeKeys.has(key))
+    .filter(([key]) => !activeKeys.has(key) && !prio.worktreeKeys.has(key))
     .map(([key, wt]) => ({ key, ...wt }))
     .filter(wt => worktreeMatches(terms, wt));
   const visibleProjects = claudeProjects.filter(p => matches(terms, { title: p.name }, p, null));
   const workProjects = visibleProjects.filter(p => !p.personal);
   const personalProjects = visibleProjects.filter(p => p.personal);
-  const waitingSessions = claudeProjects.flatMap(p => p.claudeSessions).filter(s => s.state === 'waiting').length;
-  const visibleWaiting = inFlight.waiting.filter(entryMatches);
+  const waitingSessions = claudeProjects.flatMap(p => p.claudeSessions).filter(s => s.running && s.state === 'waiting').length;
   const visibleAsked = feed
     .filter(f => !isSnoozed(annotations[f.id]))
     .filter(f => matches(terms, { title: `${f.title} ${f.subtitle ?? ''} ${f.source}` }, null, annotations[f.id]))
     .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
-  const matchCount = visibleProjects.length + visibleWaiting.length + visibleAsked.length + visibleEntries.length + visibleDormant.length + visibleSnoozed.length +
-    visibleQueued.length + orphanWorktrees.length;
+  const easyWins = [
+    ...(cat ? [] : easyExtras(claudeProjects, visibleAsked, contextWarnTokens)
+      .filter(e => matches(terms, e.item, null, null))),
+    ...shown.filter(e => e.estimate)
+  ].sort((a, b) => (a.estimate - b.estimate) || (b.score - a.score));
+  const matchCount = shown.length + visibleProjects.length + visibleAsked.length + visibleSnoozed.length +
+    orphanWorktrees.length;
+  const dormantLater = laterEntries.filter(e => e.dormant).length;
 
   async function handleRemoveOrphan(wt) {
     await fetch('/api/worktrees', {
@@ -283,24 +321,25 @@ export default function App() {
     });
   }
 
+  const actions = {
+    repos, categories: chipCategories,
+    onAnnotate: handleAnnotate,
+    onCompleteCommitment: handleCompleteCommitment,
+    onCreateWorktree: handleCreateWorktree,
+    onRemoveWorktree: handleRemoveWorktree
+  };
+  const allErrors = configError ? [configError, ...errors] : errors;
+
   return (
     <ProjectsContext.Provider value={{ all: allProjects, recent: claudeProjects, contextWarnTokens }}>
-    <div className="app">
+    <ActionsContext.Provider value={actions}>
+    <div className={`app ${focus ? 'focus-on' : ''}`}>
       <header className="app-header">
         <div className="header-top">
           <div>
             <h1>What needs you</h1>
-            {!loading && (
-              <p className="item-count">
-                {searching
-                  ? `${matchCount} match${matchCount !== 1 ? 'es' : ''}`
-                  : `${inFlight.entries.length} in flight · ${inFlight.waiting.length} waiting on others · ${queuedItems.length} queued`}
-                {waitingSessions > 0 && (
-                  <a className="header-alert" href="#claude-projects">
-                    {waitingSessions} Claude session{waitingSessions !== 1 ? 's' : ''} waiting on you
-                  </a>
-                )}
-              </p>
+            {!loading && searching && (
+              <p className="item-count">{matchCount} match{matchCount !== 1 ? 'es' : ''}</p>
             )}
           </div>
           <div className="search-field">
@@ -315,6 +354,10 @@ export default function App() {
               aria-label="Search items"
             />
           </div>
+          <div className="focus-toggle">
+            <input id="focus-toggle" type="checkbox" checked={focus} onChange={toggleFocus} />
+            <label htmlFor="focus-toggle">Focus: top 3 only</label>
+          </div>
           <button
             className="refresh-btn"
             onClick={fetchAll}
@@ -325,9 +368,30 @@ export default function App() {
             <span className={refreshing ? 'spin' : ''}>↺</span>
           </button>
         </div>
-        {errors.length > 0 && (
+        {!loading && (
+          <>
+            <HeaderStats
+              respond={countOf('respond')}
+              unsent={countOf('unsent')}
+              unsentLabel={evidenceReadyLabel}
+              overdue={prio.entries.filter(e => e.dueDays !== null && e.dueDays < 0).length}
+              follow={countOf('follow')}
+              journal={journal}
+              waitingSessions={waitingSessions}
+            />
+            <CategoryChips
+              categories={chipCategories}
+              counts={categoryCounts}
+              total={prio.entries.length}
+              respondIn={respondIn}
+              active={cat}
+              onPick={pickCategory}
+            />
+          </>
+        )}
+        {allErrors.length > 0 && (
           <div className="fetch-errors">
-            {errors.map(e => <span key={e} className="fetch-error">{e}</span>)}
+            {allErrors.map(e => <span key={e} className="fetch-error">{e}</span>)}
           </div>
         )}
       </header>
@@ -339,21 +403,38 @@ export default function App() {
           </div>
         ) : (
           <>
-            <TodayPanel journal={journal} />
-            <InFlight
-              entries={visibleEntries}
-              dormant={visibleDormant}
-              searching={searching}
-              repos={repos}
-              onAnnotate={handleAnnotate}
-              onAddCommitment={handleAddCommitment}
-              onCompleteCommitment={handleCompleteCommitment}
-              onCreateWorktree={handleCreateWorktree}
-              onRemoveWorktree={handleRemoveWorktree}
+            <DoNext entries={doNext} groupLabel={groupLabel} filtered={!!cat || searching} />
+            {!focus && <>
+            {GROUPS.map(g => (
+              <ActionGroup
+                key={g.id}
+                group={g}
+                label={groupLabel(g)}
+                purpose={g.id === 'follow'
+                  ? `Waiting on someone for over ${followUpDays} days. A nudge is yours.`
+                  : g.purpose}
+                entries={inGroup(g.id)}
+                showAll={searching || !!cat}
+              />
+            ))}
+            <EasyWins entries={easyWins} forceOpen={searching} />
+            <CollapsedGroup
+              title="Waiting on others"
+              purpose={`Sent or handed off; under ${followUpDays} days, so no nudge yet.`}
+              entries={waitingEntries}
+              open={searching}
             />
+            <CollapsedGroup
+              title="Later"
+              purpose={`Everything else.${dormantLater ? ` ${dormantLater} idle ${DORMANT_AFTER_DAYS}+ days: close or snooze them (Easy Wins).` : ''}`}
+              entries={laterEntries}
+              open={searching}
+            />
+            <section className="collapsed-group commitment-section">
+              <h2 className="group-title">Add a commitment <span className="group-purpose">Something you said you'd do that isn't a ticket.</span></h2>
+              <CommitmentForm onAdd={handleAddCommitment} />
+            </section>
             <AskedOfYou items={visibleAsked} onAnnotate={handleAnnotate} />
-            <NewWorktree repos={repos} onCreate={handleCreateAdHocWorktree} />
-            {!jiraReadOnly && <NewJiraIssue onCreated={fetchAll} />}
             <ClaudeProjects projects={workProjects} searching={searching} />
             <ClaudeProjects
               projects={personalProjects}
@@ -362,29 +443,9 @@ export default function App() {
               hint="Recent sessions in your personal projects."
               startCollapsed
             />
-            <div className="categories-grid">
-              {grouped.map(cat => (
-                <WorkCategory
-                  key={cat.id}
-                  category={cat}
-                  searching={searching}
-                  worktrees={worktrees}
-                  repos={repos}
-                  annotations={annotations}
-                  onAnnotate={handleAnnotate}
-                  onCreateWorktree={handleCreateWorktree}
-                  onRemoveWorktree={handleRemoveWorktree}
-                />
-              ))}
-            </div>
-            <WaitingOnOthers
-              entries={visibleWaiting}
-              searching={searching}
-              repos={repos}
-              onAnnotate={handleAnnotate}
-              onCreateWorktree={handleCreateWorktree}
-              onRemoveWorktree={handleRemoveWorktree}
-            />
+            <TodayPanel journal={journal} />
+            <NewWorktree repos={repos} onCreate={handleCreateAdHocWorktree} />
+            {!jiraReadOnly && <NewJiraIssue onCreated={fetchAll} />}
             <Snoozed
               entries={visibleSnoozed}
               searching={searching}
@@ -431,10 +492,12 @@ export default function App() {
                 </ul>
               </section>
             )}
+            </>}
           </>
         )}
       </main>
     </div>
+    </ActionsContext.Provider>
     </ProjectsContext.Provider>
   );
 }

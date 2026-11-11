@@ -1,5 +1,5 @@
 import { useState, useRef, useContext } from 'react';
-import { ageLabel, isSnoozed } from '../inFlight.js';
+import { ageLabel, isSnoozed } from '../signals.js';
 import { priorityRank, waitingSince } from '../urgency.js';
 import ClaudeSessions from './ClaudeSessions.jsx';
 import RelatedNotes from './RelatedNotes.jsx';
@@ -54,9 +54,12 @@ function rememberRepo(projectKey, repoName) {
   } catch {}
 }
 
+// variant 'details': the body of an action row's ▸ details, without the badges and
+// title the row already shows; extraActions are added to the Pin / Snooze buttons.
 export default function WorkItem({
   item, worktree, signals = [], stale = false, repos = [],
-  annotation, onAnnotate, onDone, onCreateWorktree, onRemoveWorktree
+  annotation, onAnnotate, onDone, onCreateWorktree, onRemoveWorktree,
+  variant = 'card', extraActions = null
 }) {
   const [busy, setBusy] = useState(false);
   const [editingNote, setEditingNote] = useState(false);
@@ -185,7 +188,8 @@ export default function WorkItem({
   }
 
   return (
-    <div className={`work-item ${activeWorktree ? 'has-worktree' : ''} ${stale ? 'is-stale' : ''}`}>
+    <div className={`work-item ${variant === 'details' ? 'work-item-details' : ''} ${activeWorktree ? 'has-worktree' : ''} ${stale ? 'is-stale' : ''}`}>
+      {variant !== 'details' && <>
       <div className="item-badges">
         <span className="badge badge-source">{SOURCE_LABELS[item.source] ?? item.source}</span>
         {item.effort && <span className={`badge badge-effort ${item.effort}`}>{item.effort}</span>}
@@ -202,6 +206,7 @@ export default function WorkItem({
       ) : (
         <span className="item-title">{item.title}</span>
       )}
+      </>}
 
       {signals.length > 0 ? (
         <div className="item-signals">
@@ -274,6 +279,7 @@ export default function WorkItem({
           {onDone && (
             <button className="item-action done" onClick={() => onDone(item)}>Done</button>
           )}
+          {extraActions}
         </div>
       )}
 

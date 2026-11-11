@@ -106,9 +106,25 @@ export async function getJiraBoards() {
 const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]*$/;
 const MAX_ISSUES = 500;
 
+function statusSet(list) {
+  return new Set((list || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+}
+
 // JIRA_WAITING_STATUSES: statuses where the next move is someone else's (comma separated)
 function waitingStatuses() {
-  return new Set((process.env.JIRA_WAITING_STATUSES || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+  return statusSet(process.env.JIRA_WAITING_STATUSES);
+}
+
+// EVIDENCE_ASK_PATTERN: a regex (case-insensitive) that marks an issue's description as
+// asking you to gather something, e.g. an auditor's request. A bad pattern is ignored.
+function evidenceAskPattern() {
+  const source = process.env.EVIDENCE_ASK_PATTERN;
+  if (!source) return null;
+  try {
+    return new RegExp(source, 'i');
+  } catch {
+    return null;
+  }
 }
 
 export async function getJiraIssueTypes(projectKey) {
@@ -180,7 +196,7 @@ export async function getJiraItems() {
     : '';
   const jql = `assignee = currentUser() AND statusCategory != Done${projectClause} ORDER BY updated DESC`;
 
-  const fields = 'summary,description,issuetype,priority,status,labels,customfield_10016,updated,created';
+  const fields = 'summary,description,issuetype,priority,status,labels,customfield_10016,updated,created,duedate';
   // search/jql pages with nextPageToken; stop at MAX_ISSUES so a bad JQL can't run away
   const issues = [];
   let nextPageToken = null;
@@ -195,6 +211,9 @@ export async function getJiraItems() {
   } while (nextPageToken && issues.length < MAX_ISSUES);
   const data = { issues };
   const waiting = waitingStatuses();
+  // JIRA_EVIDENCE_READY_STATUSES: gathered, but not yet sent on (the next move is yours)
+  const evidenceReady = statusSet(process.env.JIRA_EVIDENCE_READY_STATUSES);
+  const askPattern = evidenceAskPattern();
 
   let branchesByRepo = {};
   try {
@@ -208,24 +227,14 @@ export async function getJiraItems() {
       effort = points <= 2 ? 'small' : points <= 5 ? 'medium' : 'large';
     }
 
-    const typeName = (issue.fields.issuetype?.name || '').toLowerCase();
-    const spotlightProject = process.env.JIRA_SPOTLIGHT_PROJECT?.toUpperCase();
     const projectKey = issue.key.split('-')[0].toUpperCase();
-
-    let category = 'task';
-    if (spotlightProject && projectKey === spotlightProject) {
-      category = spotlightProject.toLowerCase();
-    } else if (typeName.includes('bug')) {
-      category = 'bug';
-    } else if (typeName.includes('doc')) {
-      category = 'docs';
-    }
 
     const bodyText = issue.fields.description?.content?.[0]?.content?.[0]?.text || '';
 
     const suggestedBranch = `${issue.key}-${slugify(issue.fields.summary)}`;
     const matches = findBranchMatches(issue.key, branchesByRepo);
     const single = matches.length === 1 ? matches[0] : null;
+    const statusName = (issue.fields.status?.name ?? '').toLowerCase();
 
     return {
       id: `jira-${issue.key}`,
@@ -233,7 +242,6 @@ export async function getJiraItems() {
       description: bodyText.slice(0, 200),
       url: `https://${JIRA_HOST}/browse/${issue.key}`,
       source: 'jira',
-      category,
       effort,
       repo: single ? single.repoName : null,
       repoName: single ? single.repoName : null,
@@ -244,7 +252,11 @@ export async function getJiraItems() {
       key: issue.key,
       subtitle: issue.fields.status?.name,
       inProgress: issue.fields.status?.statusCategory?.key === 'indeterminate',
-      waitingOnOthers: waiting.has((issue.fields.status?.name ?? '').toLowerCase()),
+      notStarted: issue.fields.status?.statusCategory?.key === 'new',
+      waitingOnOthers: waiting.has(statusName),
+      evidenceReady: evidenceReady.has(statusName),
+      evidenceAsk: !!askPattern && askPattern.test(adfToText(issue.fields.description)),
+      dueDate: issue.fields.duedate ?? null,
       priority: issue.fields.priority?.name ?? null,
       createdAt: issue.fields.created,
       updatedAt: issue.fields.updated
