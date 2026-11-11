@@ -1,8 +1,10 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useContext } from 'react';
 import { ageLabel, isSnoozed } from '../inFlight.js';
 import { priorityRank, waitingSince } from '../urgency.js';
 import ClaudeSessions from './ClaudeSessions.jsx';
 import RelatedNotes from './RelatedNotes.jsx';
+import ProjectPicker from './ProjectPicker.jsx';
+import { ProjectsContext } from '../projectsContext.js';
 
 const SOURCE_LABELS = {
   'github-pr':    'PR',
@@ -65,11 +67,20 @@ export default function WorkItem({
   const [err, setErr] = useState(null);
   const [localWorktree, setLocalWorktree] = useState(undefined);
 
-  const needsPicker = item.source === 'jira' && !item.branch && !!item.suggestedBranch;
+  // A Jira issue gets worktree controls only when it's code: a local branch names
+  // it, or its project (your choice, else the guess from notes) is a git repo.
+  // With project folders configured, other issues use the project picker instead.
+  const { all: allProjects } = useContext(ProjectsContext);
+  const projectName = annotation?.project || item.projectGuess?.name || '';
+  const projectRepo = repos.includes(projectName) ? projectName : null;
   const matches = item.branchMatches || [];
   const pickerOptions = matches.length > 0
     ? matches.map(m => ({ repoName: m.repoName, branch: m.branch, label: `${m.repoName} · ${m.branch}` }))
-    : repos.map(r => ({ repoName: r, branch: item.suggestedBranch, label: r }));
+    : allProjects.length > 0
+      ? (projectRepo ? [{ repoName: projectRepo, branch: item.suggestedBranch, label: projectRepo }] : [])
+      : repos.map(r => ({ repoName: r, branch: item.suggestedBranch, label: r }));
+  const needsPicker = item.source === 'jira' && !item.branch && !!item.suggestedBranch &&
+    pickerOptions.length > 0;
 
   const remembered = loadRememberedRepo(item.projectKey);
   const defaultPicked = pickerOptions.find(o => o.repoName === remembered)?.repoName
@@ -209,6 +220,10 @@ export default function WorkItem({
       {item.repo && <span className="item-repo">{item.repo}</span>}
 
       <RelatedNotes notes={item.notes} />
+
+      {item.source === 'jira' && (
+        <ProjectPicker item={item} annotation={annotation} onAnnotate={onAnnotate} hideAssign={!!activeWorktree} />
+      )}
 
       {editingNote ? (
         <textarea

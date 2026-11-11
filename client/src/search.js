@@ -19,6 +19,8 @@ function haystack(item, worktree, annotation) {
     worktree?.path,
     worktree?.branch,
     annotation?.note,
+    annotation?.project,
+    item.projectGuess?.name,
     ...(item.notes ?? []).map(n => n.title),
     ...(worktree?.claudeSessions ?? []).map(s => s.title)
   ].filter(Boolean).join('\n').toLowerCase();

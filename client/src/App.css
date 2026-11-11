@@ -884,3 +884,15 @@ select.item-action { background: var(--bg); }
   font: inherit;
   text-align: left;
 }
+
+.item-project {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.item-project-hint {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}

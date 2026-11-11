@@ -8,6 +8,7 @@ import Snoozed from './components/Snoozed.jsx';
 import ClaudeSessions from './components/ClaudeSessions.jsx';
 import ClaudeProjects from './components/ClaudeProjects.jsx';
 import { buildInFlight } from './inFlight.js';
+import { ProjectsContext } from './projectsContext.js';
 import { byUrgency } from './urgency.js';
 import { parseQuery, matches, worktreeMatches } from './search.js';
 
@@ -27,6 +28,7 @@ export default function App() {
   const [spotlightProject, setSpotlightProject] = useState(null);
   const [jiraReadOnly, setJiraReadOnly] = useState(false);
   const [claudeProjects, setClaudeProjects] = useState([]);
+  const [allProjects, setAllProjects] = useState([]);
   const [repos, setRepos] = useState([]);
   const [annotations, setAnnotations] = useState({});
   const [commitments, setCommitments] = useState([]);
@@ -54,6 +56,10 @@ export default function App() {
     fetch('/api/repos')
       .then(r => r.json())
       .then(list => setRepos(Array.isArray(list) ? list : []))
+      .catch(() => {});
+    fetch('/api/claude/projects/all')
+      .then(r => r.json())
+      .then(list => setAllProjects(Array.isArray(list) ? list : []))
       .catch(() => {});
   }, []);
 
@@ -83,7 +89,9 @@ export default function App() {
       : (errs.push('GitHub: ' + (githubRes.reason?.message || 'failed')), []);
 
     const jiraItems = jiraRes.status === 'fulfilled' && Array.isArray(jiraRes.value)
-      ? jiraRes.value.map(i => (notesByKey[i.key] ? { ...i, notes: notesByKey[i.key] } : i))
+      ? jiraRes.value.map(i => (notesByKey[i.key]
+        ? { ...i, notes: notesByKey[i.key].notes, projectGuess: notesByKey[i.key].project }
+        : i))
       : (errs.push('Jira: ' + (jiraRes.reason?.message || jiraRes.value?.error || 'failed')), []);
 
     const allItems = [...githubItems, ...jiraItems];
@@ -242,6 +250,7 @@ export default function App() {
   }
 
   return (
+    <ProjectsContext.Provider value={{ all: allProjects, recent: claudeProjects }}>
     <div className="app">
       <header className="app-header">
         <div className="header-top">
@@ -370,5 +379,6 @@ export default function App() {
         )}
       </main>
     </div>
+    </ProjectsContext.Provider>
   );
 }

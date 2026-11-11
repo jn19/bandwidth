@@ -7,6 +7,7 @@ import { execFile, spawn } from 'child_process';
 import { listAllWorktrees } from './git.js';
 import { buildTaskBrief, sessionName } from './taskBrief.js';
 import { childEnv } from '../security.js';
+import { projectBases, findProject } from './projects.js';
 
 // Claude Code writes one JSONL transcript per session under
 // ~/.claude/projects/{encoded-cwd}/{sessionId}.jsonl. Each entry carries the cwd,
@@ -16,6 +17,9 @@ const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 // the tail (for latest title / last prompt)
 const HEAD_BYTES = 64 * 1024;
 const TAIL_BYTES = 256 * 1024;
+// When the tail has no title or prompt (large tool output, images), look further back
+const DEEP_STEP = 1024 * 1024;
+const DEEP_MAX = 8 * 1024 * 1024;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const JIRA_KEY_RE = /^[A-Z][A-Z0-9_]*-\d+$/;
 const GITHUB_REPO_RE = /^[\w.-]+\/[\w.-]+$/;
@@ -74,6 +78,9 @@ async function readSession(file) {
   const tail = parseLines(tailText, { dropFirst: tailStart > 0 });
 
   const cwd = head.find(e => e.cwd)?.cwd ?? tail.find(e => e.cwd)?.cwd ?? null;
+  // `claude -p` / SDK runs are scripted, not conversations to resume
+  const headless = (head.find(e => e.entrypoint)?.entrypoint ?? '').startsWith('sdk')
+    && process.env.CLAUDE_INCLUDE_HEADLESS !== 'true';
   let customTitle = null, aiTitle = null, lastPrompt = null;
   for (const entry of tail) {
     if (entry.type === 'custom-title') customTitle = entry.customTitle;
@@ -81,11 +88,16 @@ async function readSession(file) {
     lastPrompt = promptText(entry) ?? lastPrompt;
   }
   const firstPrompt = head.map(promptText).find(Boolean) ?? null;
+  if (!customTitle && !aiTitle && !lastPrompt && size > HEAD_BYTES + TAIL_BYTES) {
+    ({ customTitle, aiTitle, lastPrompt } = await searchBack(file, tailStart));
+  }
+  const talked = [...head, ...tail].some(e => e.type === 'assistant');
 
   const id = basename(file, '.jsonl');
-  const title = customTitle || aiTitle || firstPrompt;
+  // Long sessions can have their title outside the bytes read; the last prompt stands in
+  const title = customTitle || aiTitle || firstPrompt || lastPrompt || (talked ? '(untitled session)' : null);
   // Sessions with nothing typed in them (e.g. just /login) aren't worth listing
-  const session = cwd && title ? {
+  const session = cwd && title && !headless ? {
     id,
     cwd,
     title,
@@ -95,6 +107,25 @@ async function readSession(file) {
   } : null;
   cache.set(file, { mtimeMs, size, session });
   return session;
+}
+
+// Reads backwards from `end` in 1 MB steps (up to 8 MB) for the newest title
+// entry and the newest typed prompt
+async function searchBack(file, end) {
+  const found = { customTitle: null, aiTitle: null, lastPrompt: null };
+  for (let stop = end, read = 0; stop > HEAD_BYTES && read < DEEP_MAX; read += DEEP_STEP) {
+    const start = Math.max(HEAD_BYTES, stop - DEEP_STEP);
+    const entries = parseLines(await readRange(file, start, stop - start), { dropFirst: true, dropLast: true });
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.type === 'custom-title') found.customTitle ??= e.customTitle;
+      else if (e.type === 'ai-title') found.aiTitle ??= e.aiTitle;
+      else found.lastPrompt ??= promptText(e);
+    }
+    if (found.customTitle || found.aiTitle) break;
+    stop = start;
+  }
+  return found;
 }
 
 export async function listSessions() {
@@ -229,14 +260,8 @@ export async function resumeSession(sessionId) {
   openClaude({ cwd: session.cwd, title: session.title, args: ['--resume', session.id] });
 }
 
-// Folders whose subfolders are Claude projects (CLAUDE_PROJECT_DIRS, colon
-// separated). Sessions started anywhere inside a project are grouped under it,
-// so work that isn't in a git worktree shows up too.
-export function projectBases() {
-  return (process.env.CLAUDE_PROJECT_DIRS || '').split(':').filter(Boolean)
-    .map(d => resolve(d.replace(/^~/, homedir())));
-}
-
+// Recent sessions grouped by project folder (see projects.js). Sessions started
+// anywhere inside a project count, so work outside git worktrees shows up too.
 export async function listClaudeProjects() {
   const bases = projectBases();
   if (bases.length === 0) return [];
@@ -288,21 +313,32 @@ function validateItem(item) {
   }
 }
 
-// Starts an interactive Claude session in the item's worktree, seeded with a
-// task brief. Interactive so Claude can ask questions; the user's default
-// permission mode applies.
-export async function assignToClaude(item, worktreePath) {
+// Starts an interactive Claude session seeded with a task brief, either in the
+// item's git worktree or (Jira only) in a project folder from CLAUDE_PROJECT_DIRS.
+// Interactive so Claude can ask questions; the user's default permission mode applies.
+export async function assignToClaude(item, { worktreePath, projectPath } = {}) {
   validateItem(item);
-  const worktree = (await listAllWorktrees()).find(wt => wt.path === worktreePath);
-  if (!worktree) throw new Error('Worktree not found');
+  let location;
+  if (worktreePath) {
+    const worktree = (await listAllWorktrees()).find(wt => wt.path === worktreePath);
+    if (!worktree) throw new Error('Worktree not found');
+    location = { kind: 'worktree', path: worktree.path, branch: worktree.branch };
+  } else if (projectPath) {
+    if (item.source !== 'jira') throw new Error('Only Jira issues can be assigned to a project folder');
+    const project = await findProject(projectPath);
+    if (!project) throw new Error('Project not found');
+    location = { kind: 'project', path: project.path, isRepo: project.isRepo };
+  } else {
+    throw new Error('A worktree or project is required');
+  }
 
-  const brief = await buildTaskBrief(item, worktree);
+  const brief = await buildTaskBrief(item, location);
   await mkdir(BRIEFS_DIR, { recursive: true });
   const slug = (item.key || `${item.repo}-${item.number}`).replace(/[^\w.-]+/g, '-');
   const briefPath = join(BRIEFS_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}-${slug}.md`);
   await writeFile(briefPath, brief);
 
   const name = sessionName(item);
-  openClaude({ cwd: worktree.path, title: name, args: ['-n', name], promptFile: briefPath });
+  openClaude({ cwd: location.path, title: name, args: ['-n', name], promptFile: briefPath });
   return { briefPath };
 }

@@ -1,7 +1,8 @@
 import { readFile } from 'fs/promises';
 import { homedir } from 'os';
 import { getJiraIssueDetail } from './jira.js';
-import { notesByTicket } from './notes.js';
+import { basename } from 'path';
+import { notesByTicket, orderNotes } from './notes.js';
 
 // The opening prompt for a Claude session assigned to a work item. Jira details
 // are fetched here with the server's credentials; for GitHub, Claude runs `gh`
@@ -22,6 +23,26 @@ function relatedNotes(notes) {
     notes.map(n => `- \`${n.path}\`${n.summary ? `: ${n.summary}` : ''}`).join('\n')}`;
 }
 
+// Where the session runs: a git worktree for this item, or the project folder
+function whereText(location) {
+  if (location.kind === 'project') {
+    return `You're in my project folder for this work, \`${location.path}\`. It isn't a git worktree for this issue${
+      location.isRepo ? ' (the folder is a git repo, on whatever branch it has checked out)' : ''}.`;
+  }
+  return `You're in a git worktree for this issue at \`${location.path}\`, on branch \`${location.branch}\`.`;
+}
+
+function agreement(location, key) {
+  if (location.kind === 'project') {
+    return WORKING_AGREEMENT.replace(
+      "4. Commit your work to this branch when it's in a good state.",
+      "4. Don't commit, push or open PRs unless I ask.");
+  }
+  return key
+    ? WORKING_AGREEMENT.replace("when it's in a good state.", `when it's in a good state, with a message that references ${key}.`)
+    : WORKING_AGREEMENT;
+}
+
 function jiraBrief(issue, worktree, notes) {
   const meta = [
     issue.type && `Type: ${issue.type}`,
@@ -39,7 +60,7 @@ function jiraBrief(issue, worktree, notes) {
   return `You've been assigned Jira issue ${issue.key}: ${issue.summary}
 ${issue.url}
 
-You're in a git worktree for this issue at \`${worktree.path}\`, on branch \`${worktree.branch}\`.
+${whereText(worktree)}
 
 ## Issue
 
@@ -49,7 +70,7 @@ ${meta}
 
 ${issue.description || '_No description provided._'}${comments}${relatedNotes(notes)}
 
-${WORKING_AGREEMENT.replace("when it's in a good state.", `when it's in a good state, with a message that references ${issue.key}.`)}`;
+${agreement(worktree, issue.key)}`;
 }
 
 function githubIssueBrief(item, worktree) {
@@ -118,7 +139,9 @@ async function appendix() {
 }
 
 export async function buildTaskBrief(item, worktree) {
-  const notes = item.source === 'jira' ? (await notesByTicket().catch(() => ({})))[item.key] : null;
+  // Notes from the folder Claude starts in come first; at most 8 are listed
+  const all = item.source === 'jira' ? (await notesByTicket().catch(() => ({})))[item.key] : null;
+  const notes = all && orderNotes(all, basename(worktree.path)).slice(0, 8);
   return (await buildBrief(item, worktree, notes)) + await appendix();
 }
 

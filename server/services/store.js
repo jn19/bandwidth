@@ -8,7 +8,9 @@ import { randomUUID } from 'crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = resolve(__dirname, '../data/state.json');
 
-const ANNOTATION_FIELDS = ['note', 'pinned', 'snoozedUntil'];
+const ANNOTATION_FIELDS = ['note', 'pinned', 'snoozedUntil', 'project'];
+// Remembered settings, not work: changing them doesn't count as activity
+const QUIET_FIELDS = new Set(['project']);
 
 function emptyState() {
   return { annotations: {}, commitments: [] };
@@ -59,7 +61,9 @@ export function annotate(id, patch) {
       delete state.annotations[id];
       return null;
     }
-    next.updatedAt = new Date().toISOString();
+    if (Object.keys(patch).some(f => ANNOTATION_FIELDS.includes(f) && !QUIET_FIELDS.has(f))) {
+      next.updatedAt = new Date().toISOString();
+    }
     state.annotations[id] = next;
     return next;
   });
