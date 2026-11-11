@@ -16,7 +16,7 @@ npm run dev:server   # Express on :3001
 npm run dev:client   # Vite on :5173
 ```
 
-`npm test` runs the client unit tests (`client/src/*.test.js`, Node's built-in runner). There is no lint script.
+`npm test` runs the unit tests (`client/src/*.test.js`, `server/services/*.test.js`; Node's built-in runner). There is no lint script.
 
 ## Architecture
 
@@ -120,11 +120,13 @@ Both resume and assign open a Terminal tab whose custom title is the session or 
 
 ### Personal state
 
-`server/services/store.js` keeps what GitHub/Jira don't know in `server/data/state.json` (gitignored), served under `/api/state`:
+`server/services/store.js` keeps what GitHub/Jira don't know in `server/data/state.json` (gitignored), or with `STATE_DIR` in a synced folder shared by several machines, served under `/api/state`:
 - `annotations: { [itemId]: { note, pinned, snoozedUntil, project, category, estimate, updatedAt } }`: any item can be annotated, including commitments and ad-hoc worktrees (`worktree-{repo}/{branch}`). `PUT /api/state/annotations` takes `{ id, ...patch }` (id goes in the body because it can contain slashes). `null` / `''` / `false` clear a field, and an annotation with no fields left is deleted. An annotation edit counts as activity for staleness, except the quiet fields `project`, `category` and `estimate` (category must be an id, estimate 2/5/15/30/`'none'`; anything else is a 400).
 - `commitments: [{ id, title, dueDate, createdAt }]`: free-text promises with an optional local `YYYY-MM-DD` due date. `POST /api/state/commitments` adds one; `DELETE /api/state/commitments/:id` marks it done (removes it and its annotation).
 
 Writes are serialized through a promise queue and written atomically (tmp file + rename). A corrupt file errors instead of being reset.
+
+With `STATE_DIR`, each machine writes only `state-<STATE_MACHINE or hostname>.json` there (one writer per file, so a sync tool never has to pick a winner), and reads merge every `state-*.json`. Records carry `changedAt`; per id the newest wins (ties: later machine name). Clearing an annotation or removing a commitment writes `{ deleted: true }`. Another machine's unreadable file is skipped with a warning; this machine's own throws. The API strips `changedAt` / `deleted`. Old-format files (commitments as a list) still read.
 
 ## Environment
 
@@ -138,6 +140,7 @@ Copy `.env.example` to `.env` at the repo root. The server loads it from `../  .
 | `JIRA_WAITING_STATUSES` / `FOLLOW_UP_DAYS` | Next move is someone else's; days idle before Follow up (default 5) |
 | `JIRA_EVIDENCE_READY_STATUSES` / `EVIDENCE_READY_LABEL` / `EVIDENCE_ASK_PATTERN` | Evidence gathered-not-sent statuses and group name; regex for "evidence asked for" |
 | `CATEGORY_RULES_FILE` | JSON work-area rules (filter chips) and quick-win rules; format in README |
+| `STATE_DIR` / `STATE_MACHINE` | Synced folder for pins, notes and commitments shared across machines; this machine's name (default: hostname) |
 | `LOCAL_REPO_BASE` | Parent dir of local repos; defaults to `~/development` |
 | `GITHUB_INCLUDE_ISSUES` | Set to `false` to skip the assigned-issues fetch; PRs only. Defaults to `true` |
 | `JIRA_API_BASE` / `JIRA_READ_ONLY` | Gateway base URL for scoped tokens; `true` refuses Jira writes and hides the create form |

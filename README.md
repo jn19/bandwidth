@@ -73,6 +73,8 @@ For **Resume** and **Assign to Claude**, set `BANDWIDTH_LAUNCHER` to a program t
 | `JIRA_EVIDENCE_READY_STATUSES` / `EVIDENCE_READY_LABEL` | Optional. Statuses meaning "gathered, not sent yet" (the next move is yours), and the name of their group (default `Evidence ready`) |
 | `EVIDENCE_ASK_PATTERN` | Optional regex (case-insensitive). An issue whose description matches is asking you to gather something; open ones go to **To gather** |
 | `CATEGORY_RULES_FILE` | Optional JSON file of work areas shown as filter chips, plus quick-win rules (see **Categories** below) |
+| `STATE_DIR` | Optional. A folder synced between your machines (Syncthing, a cloud drive) to share pins, snoozes, notes, commitments and overrides. Each machine writes only its own `state-<machine>.json` there and reads all of them; the newest change per item wins. Without it, state stays in `server/data/state.json` |
+| `STATE_MACHINE` | This machine's name in `STATE_DIR` (default: the hostname). Give each machine a different one |
 | `SESSION_STATE_DIR` | Optional. Folder of JSON files written by a Claude Code hook, one per live session: `{ session_id, state: idle\|busy\|waiting, ts, pane? }`. Shows each running session's state and sorts sessions waiting on you first |
 | `FOCUS_URL_TEMPLATE` | Optional. Link that brings a running session's terminal to the front, with `{title}` `{project}` (URL-encoded) or `{title64}` `{project64}` (base64url) placeholders |
 | `CONTEXT_WARN_TOKENS` | Running sessions at or above this context size are flagged "save & clear" (default `400000`) |
@@ -126,7 +128,7 @@ A `match` entry matches when all its conditions do: `projects` (Jira keys), `tit
 - **Snooze**: hides it until tomorrow, next Monday, or two weeks out, then it comes back on its own. Snoozed items are listed in a collapsed section at the bottom so they're never lost.
 - **Note**: where you left off, or the next step.
 
-**Add a commitment** adds a promise that has no ticket, with an optional due date; it shows in Due soon or In progress. **Mark done** when it's finished. All of this is stored locally in `server/data/state.json` (gitignored).
+**Add a commitment** adds a promise that has no ticket, with an optional due date; it shows in Due soon or In progress. **Mark done** when it's finished. All of this is stored locally in `server/data/state.json` (gitignored), or with `STATE_DIR` in a folder your machines share.
 
 **Git worktrees** — GitHub PRs have a "Create worktree" button. Clicking it runs `git worktree add` so you can context-switch between tasks without stashing. The worktree path is shown on the card; "Remove worktree" cleans it up. "Open in Code" launches VS Code on the worktree. Worktrees are created at `{LOCAL_REPO_BASE}/{repo-name}-worktrees/{branch-name}`.
 
