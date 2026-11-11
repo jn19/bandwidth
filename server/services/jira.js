@@ -178,7 +178,7 @@ export async function getJiraItems() {
   const projectClause = JIRA_PROJECT_KEYS
     ? ` AND project in (${JIRA_PROJECT_KEYS})`
     : '';
-  const jql = `assignee = currentUser() AND status not in (Done, Closed, Resolved)${projectClause} ORDER BY updated DESC`;
+  const jql = `assignee = currentUser() AND statusCategory != Done${projectClause} ORDER BY updated DESC`;
 
   const fields = 'summary,description,issuetype,priority,status,labels,customfield_10016,updated,created';
   // search/jql pages with nextPageToken; stop at MAX_ISSUES so a bad JQL can't run away
